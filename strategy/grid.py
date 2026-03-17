@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from config import (
     CAPITAL_USDT,
+    FEE_RATE,
     GRID_LEVELS,
     GRID_LOWER,
     GRID_UPPER,
@@ -29,6 +30,7 @@ class SimulatedTrade:
     sell_price: float
     qty: float
     profit_usdt: float
+    commission_usdt: float
     timestamp_ms: int
 
 
@@ -40,6 +42,7 @@ class SimulationResult:
     winning_trades: int
     pnl_usdt: float
     pnl_pct: float
+    total_commission_usdt: float = 0.0
     trades: list[SimulatedTrade] = field(default_factory=list)
     initial_capital: float = 0.0
     final_capital: float = 0.0
@@ -113,13 +116,16 @@ def run_grid_simulation(
             if low <= sell_price <= high:
                 qty = pos["qty"]
                 buy_price = pos["buy_price"]
-                profit = qty * (sell_price - buy_price)
+                gross_profit = qty * (sell_price - buy_price)
+                commission = FEE_RATE * qty * (buy_price + sell_price)
+                net_profit = gross_profit - commission
                 completed_trades.append(
                     SimulatedTrade(
                         buy_price=buy_price,
                         sell_price=sell_price,
                         qty=qty,
-                        profit_usdt=profit,
+                        profit_usdt=net_profit,
+                        commission_usdt=commission,
                         timestamp_ms=open_time,
                     )
                 )
@@ -137,6 +143,7 @@ def run_grid_simulation(
                 positions[level_idx] = {"qty": qty, "buy_price": buy_price}
 
     total_pnl = sum(t.profit_usdt for t in completed_trades)
+    total_commission = sum(t.commission_usdt for t in completed_trades)
     winning = sum(1 for t in completed_trades if t.profit_usdt > 0)
     pnl_pct = (total_pnl / cap * 100) if cap > 0 else 0
 
@@ -145,6 +152,7 @@ def run_grid_simulation(
         winning_trades=winning,
         pnl_usdt=total_pnl,
         pnl_pct=pnl_pct,
+        total_commission_usdt=total_commission,
         trades=completed_trades,
         initial_capital=cap,
         final_capital=cap + total_pnl,

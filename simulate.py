@@ -114,6 +114,7 @@ def run_single_simulation(
             "win_rate_pct": win_rate,
             "pnl_usdt": result.pnl_usdt,
             "pnl_pct": result.pnl_pct,
+            "total_commission_usdt": result.total_commission_usdt,
         },
         "trades": result.trades,
     }, klines
@@ -191,7 +192,8 @@ def run_single_mode(client, interval: str, target_days: int) -> None:
     pnl_color = "green" if res["pnl_usdt"] >= 0 else "red"
     table.add_row("Trades ejecutados", str(res["total_trades"]))
     table.add_row("Trades ganadores", f"{res['winning_trades']} ({res['win_rate_pct']:.1f}%)")
-    table.add_row("P&L simulado", f"[{pnl_color}]${res['pnl_usdt']:+,.2f} USDT[/{pnl_color}]")
+    table.add_row("Comisiones (Binance 0.1%)", f"${res.get('total_commission_usdt', 0):,.2f} USDT")
+    table.add_row("P&L neto (post-comisiones)", f"[{pnl_color}]${res['pnl_usdt']:+,.2f} USDT[/{pnl_color}]")
     table.add_row("Retorno %", f"[{pnl_color}]{res['pnl_pct']:+.2f}%[/{pnl_color}]")
     table.add_row("Espaciado", f"${step:,.2f} ({step_pct:.2f}%)")
     table.add_row("Período", f"{days:.1f} días")
@@ -339,7 +341,7 @@ def save_report(report: dict, filename: str) -> None:
     out = {}
     for k, v in report.items():
         if k == "trades" and v:
-            out[k] = [{"buy_price": t.buy_price, "sell_price": t.sell_price, "qty": t.qty, "profit_usdt": t.profit_usdt} for t in v]
+            out[k] = [{"buy_price": t.buy_price, "sell_price": t.sell_price, "qty": t.qty, "profit_usdt": t.profit_usdt, "commission_usdt": getattr(t, "commission_usdt", 0)} for t in v]
         elif isinstance(v, dict):
             out[k] = v
         else:

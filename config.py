@@ -52,6 +52,12 @@ def get_grid_bounds(current_price: float) -> tuple[float, float]:
 STOP_LOSS_PCT = get_float("STOP_LOSS_PCT", 0.05)
 MAX_ORDER_SIZE = get_float("MAX_ORDER_SIZE", 50)
 
+# ADX: pause grid only when trend is BEARISH and ADX > threshold (operate in bullish trends)
+ADX_PAUSE_THRESHOLD = get_float("ADX_PAUSE_THRESHOLD", 35)
+
+# Binance spot fee (0.1% default, 0.075% with BNB)
+FEE_RATE = get_float("FEE_RATE", 0.001)
+
 # Optional reserve (% of ETH to never sell, 0 = use all in grid)
 RESERVE_ETH_PCT = get_float("RESERVE_ETH_PCT", 0)
 
