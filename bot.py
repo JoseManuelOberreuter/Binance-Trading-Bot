@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import ta
+from ta.volatility import AverageTrueRange
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
@@ -19,17 +20,21 @@ from rich.prompt import Confirm, FloatPrompt, IntPrompt
 
 from config import (
     ADX_PAUSE_THRESHOLD,
+    BASE_ASSET,
     CAPITAL_USDT,
     GRID_LEVELS,
     GRID_SPREAD_PCT,
+    MAX_BASE_INVENTORY_PCT,
     MAX_ORDER_SIZE,
+    RELOCATE_COOLDOWN_SEC,
+    RELOCATE_THRESHOLD_PCT,
     STOP_LOSS_PCT,
     SYMBOL,
     get_grid_bounds,
 )
 from exchange.client import get_client
 from risk.manager import check_stop_loss
-from strategy.grid import compute_grid_levels
+from strategy.grid import compute_adaptive_spread_pct, compute_grid_levels
 
 load_dotenv()
 console = Console()
@@ -38,11 +43,10 @@ LOOP_INTERVAL_SEC = 60
 TRADES_DB = Path("logs/trades.db")
 
 
-def get_adx_and_direction(client) -> tuple[float, float, float]:
+def get_indicators_1h(client) -> tuple[float, float, float, float]:
     """
-    Compute ADX and directional indicators from 1h klines.
-    Returns (adx, plus_di, minus_di).
-    Bearish when minus_di > plus_di. Bullish when plus_di > minus_di.
+    ADX/DI and ATR% from 1h klines (single fetch).
+    Returns (adx, plus_di, minus_di, atr_pct) where atr_pct = ATR/close*100.
     """
     klines = client.get_klines(symbol=SYMBOL, interval="1h", limit=200)
     df = pd.DataFrame(klines, columns=[
@@ -56,7 +60,13 @@ def get_adx_and_direction(client) -> tuple[float, float, float]:
     adx = float(adx_ind.adx().iloc[-1])
     plus_di = float(adx_ind.adx_pos().iloc[-1])
     minus_di = float(adx_ind.adx_neg().iloc[-1])
-    return adx, plus_di, minus_di
+    atr_ind = AverageTrueRange(
+        high=df["high"], low=df["low"], close=df["close"], window=14
+    )
+    atr_val = float(atr_ind.average_true_range().iloc[-1])
+    close = float(df["close"].iloc[-1])
+    atr_pct = (atr_val / close) * 100.0 if close > 0 else 2.0
+    return adx, plus_di, minus_di, atr_pct
 
 
 def get_symbol_filters(client) -> tuple[float, float, float]:
@@ -192,16 +202,6 @@ def get_historical_realized_pnl(conn: sqlite3.Connection) -> float:
     return float(row[0] or 0.0)
 
 
-def get_historical_trades_volume_usdt(conn: sqlite3.Connection) -> float:
-    """Return cumulative executed trades volume in USDT."""
-    row = conn.execute(
-        "SELECT COALESCE(SUM(CASE WHEN quote_qty > 0 THEN quote_qty ELSE price * qty END), 0) FROM trades"
-    ).fetchone()
-    if not row:
-        return 0.0
-    return float(row[0] or 0.0)
-
-
 def get_balance_usdt(client) -> float:
     """Get free USDT balance."""
     try:
@@ -236,6 +236,24 @@ def get_portfolio_value_usdt(client) -> float:
     return usdt + eth * price
 
 
+def base_price_at_portfolio_usdt(
+    usdt_free: float,
+    base_free: float,
+    target_portfolio_usdt: float,
+) -> float | None:
+    """
+    If portfolio ≈ USDT_free + base_free * price, return the base/quote price at which
+    portfolio value equals target_portfolio_usdt (e.g. stop-loss portfolio floor).
+    None if not representable (no base, or no positive price).
+    """
+    if base_free <= 1e-12 or target_portfolio_usdt <= 0:
+        return None
+    p = (target_portfolio_usdt - usdt_free) / base_free
+    if p <= 0:
+        return None
+    return p
+
+
 def get_open_orders_side_counts(open_orders: dict) -> tuple[int, int]:
     """Return (buy_count, sell_count) from open orders dict."""
     buy_count = 0
@@ -247,6 +265,24 @@ def get_open_orders_side_counts(open_orders: dict) -> tuple[int, int]:
         elif side == "SELL":
             sell_count += 1
     return buy_count, sell_count
+
+
+def base_inventory_ratio(client, mark_price: float) -> float:
+    """Share of portfolio value in base asset (0..1)."""
+    usdt = get_balance_usdt(client)
+    base = get_balance_eth(client)
+    pv = usdt + base * mark_price
+    if pv <= 1e-12:
+        return 0.0
+    return (base * mark_price) / pv
+
+
+def cancel_all_open_orders(client) -> None:
+    for o in client.get_open_orders(symbol=SYMBOL):
+        try:
+            client.cancel_order(symbol=SYMBOL, orderId=o["orderId"])
+        except Exception:
+            pass
 
 
 def get_open_orders_notional_usdt(open_orders: dict) -> float:
@@ -270,7 +306,7 @@ def pre_start_setup(client, current_price: float, min_notional: float) -> tuple[
     usdt_balance = get_balance_usdt(client)
     base_balance = get_balance_eth(client)
     portfolio_value = get_portfolio_value_usdt(client)
-    adx, plus_di, minus_di = get_adx_and_direction(client)
+    adx, plus_di, minus_di, _atr = get_indicators_1h(client)
     is_bearish = minus_di > plus_di
     trend_name = "Bearish" if is_bearish else "Bullish"
 
@@ -290,7 +326,7 @@ def pre_start_setup(client, current_price: float, min_notional: float) -> tuple[
             f"Free balance: USDT ${usdt_balance:,.2f} | {SYMBOL.replace('USDT', '')} {base_balance:,.6f}\n"
             f"Portfolio value: ${portfolio_value:,.2f}\n"
             f"Trend now: {trend_name} (ADX {adx:.2f}, +DI {plus_di:.2f}, -DI {minus_di:.2f})\n"
-            f"Exchange min notional: ${min_notional:,.2f}\n\n"
+            f"Exchange min notional: ${min_notional:,.2f}\n"
             f"[bold]Recommendation[/bold]\n"
             f"Investment amount: ${recommended_capital:,.2f}\n"
             f"Grid levels: {recommended_grids}\n"
@@ -336,6 +372,7 @@ def run_bot_cycle(
     capital_usdt: float,
     prev_orders: dict,
     conn: sqlite3.Connection,
+    max_base_inventory_pct: float,
 ) -> tuple[dict, list]:
     """Run one bot cycle. Returns (prev_orders, events). Events are dicts with type, ..."""
     events = []
@@ -343,9 +380,16 @@ def run_bot_cycle(
     current_price = float(price_ticker["price"])
     open_orders = {o["orderId"]: o for o in client.get_open_orders(symbol=SYMBOL)}
 
-    # Find nearest level (tolerant to grid recomputation each cycle)
-    grid_step = (levels[1].buy_price - levels[0].buy_price) if len(levels) >= 2 else 15.0
-    max_distance = grid_step * 1.5  # Reject if fill is too far from any level
+    # Find nearest level (tolerant to grid recomputation each cycle; geometric steps vary)
+    if len(levels) >= 2:
+        steps = [
+            levels[i + 1].buy_price - levels[i].buy_price
+            for i in range(len(levels) - 1)
+        ]
+        grid_step = min(steps) if steps else 15.0
+    else:
+        grid_step = 15.0
+    max_distance = max(grid_step * 1.5, current_price * 0.002)
 
     def find_level(price: float, side: str) -> int | None:
         best_idx, best_dist = None, float("inf")
@@ -416,6 +460,9 @@ def run_bot_cycle(
             prev_orders[oid] = order
 
     if not prev_orders:
+        if base_inventory_ratio(client, current_price) >= max_base_inventory_pct:
+            events.append({"type": "inventory_skipped", "ratio": base_inventory_ratio(client, current_price)})
+            return prev_orders, events
         usdt_per = min(capital_usdt / len(levels), MAX_ORDER_SIZE)
         usdt_bal = get_balance_usdt(client)
         placed = 0
@@ -453,7 +500,7 @@ def run_bot_cycle(
 def main() -> None:
     env = os.getenv("ENVIRONMENT", "production")
     if env != "testnet":
-        console.print("[bold yellow]Advertencia: ENVIRONMENT no es 'testnet'. Para producción usa con cuidado.[/bold yellow]\n")
+        console.print("[bold yellow]Advertencia: ENVIRONMENT no es 'testnet'. Para producción usa con cuidado.[/bold yellow]")
 
     init_db()
 
@@ -464,7 +511,10 @@ def main() -> None:
         return
 
     current_price = float(client.get_symbol_ticker(symbol=SYMBOL)["price"])
-    bounds = get_grid_bounds(current_price)
+    adx0, plus_di0, minus_di0, atr0 = get_indicators_1h(client)
+    is_b0 = minus_di0 > plus_di0
+    spread0 = compute_adaptive_spread_pct(atr0, adx0, is_b0)
+    bounds = get_grid_bounds(current_price, spread_pct=spread0)
     tick_size, step_size, min_notional = get_symbol_filters(client)
     prev_orders: dict = {}
     conn = sqlite3.connect(TRADES_DB)
@@ -479,31 +529,60 @@ def main() -> None:
 
     console.print(Panel(
         f"[bold]Grid Bot — {SYMBOL}[/bold]\n"
-        f"Precio actual: ${current_price:,.2f}  |  Rango: ${bounds[0]:,.0f} - ${bounds[1]:,.0f} (±{GRID_SPREAD_PCT}%)\n"
-        f"{selected_grid_levels} niveles  |  Capital: ${selected_capital_usdt:,.2f}  |  Loop: {LOOP_INTERVAL_SEC}s",
+        f"Precio: ${current_price:,.2f} | Rango ${bounds[0]:,.0f}-${bounds[1]:,.0f} (±{spread0:.1f}%)\n"
+        f"{selected_grid_levels} niveles | Capital ${selected_capital_usdt:,.2f} | Loop {LOOP_INTERVAL_SEC}s",
         box=box.DOUBLE_EDGE,
         style="bold blue",
     ))
-    console.print("[dim]Ctrl+C para detener[/dim]\n")
+    console.print("[dim]Ctrl+C para detener[/dim]")
+
+    session_realized_pnl = 0.0  # Sum of closed-trade profit since this run (matches ✅ Trade lines).
+    grid_anchor = float(client.get_symbol_ticker(symbol=SYMBOL)["price"])
+    last_relocate_ts = time.time()
 
     try:
         while True:
             try:
-                adx, plus_di, minus_di = get_adx_and_direction(client)
+                adx, plus_di, minus_di, atr_pct = get_indicators_1h(client)
                 is_bearish = minus_di > plus_di
                 should_pause = adx > ADX_PAUSE_THRESHOLD and is_bearish
 
                 if should_pause:
-                    ts = datetime.now().strftime("%H:%M:%S")
+                    ts = datetime.now().strftime("%H:%M")
                     console.print(
-                        f"[dim]{ts}[/dim] [yellow]⏸ Grid pausado — ADX={adx:.0f}, tendencia bajista (-DI:{minus_di:.0f} > +DI:{plus_di:.0f})[/yellow]"
+                        f"[dim]{ts}[/dim] [yellow]⏸ Pausa: ADX {adx:.0f}, bajista (-DI {minus_di:.0f} > +DI {plus_di:.0f})[/yellow]"
                     )
                     time.sleep(LOOP_INTERVAL_SEC)
                     continue
 
                 price = float(client.get_symbol_ticker(symbol=SYMBOL)["price"])
-                levels = compute_grid_levels(current_price=price, n_levels=selected_grid_levels)
-                prev_orders, cycle_events = run_bot_cycle(
+                spread_pct = compute_adaptive_spread_pct(atr_pct, adx, is_bearish)
+                levels = compute_grid_levels(
+                    current_price=price,
+                    n_levels=selected_grid_levels,
+                    spread_pct=spread_pct,
+                )
+
+                cycle_events: list = []
+                if grid_anchor > 0:
+                    dist_pct = abs(price - grid_anchor) / grid_anchor * 100.0
+                    if (
+                        dist_pct >= RELOCATE_THRESHOLD_PCT
+                        and (time.time() - last_relocate_ts) >= RELOCATE_COOLDOWN_SEC
+                    ):
+                        old_anchor = grid_anchor
+                        cancel_all_open_orders(client)
+                        prev_orders = {}
+                        grid_anchor = price
+                        last_relocate_ts = time.time()
+                        cycle_events.append({
+                            "type": "grid_relocated",
+                            "from": old_anchor,
+                            "to": price,
+                            "spread_pct": spread_pct,
+                        })
+
+                prev_orders, more_events = run_bot_cycle(
                     client,
                     levels,
                     tick_size,
@@ -512,28 +591,41 @@ def main() -> None:
                     selected_capital_usdt,
                     prev_orders,
                     conn,
+                    MAX_BASE_INVENTORY_PCT / 100.0,
                 )
-                ts = datetime.now().strftime("%H:%M:%S")
+                cycle_events.extend(more_events)
+                ts = datetime.now().strftime("%H:%M")
 
                 for ev in cycle_events:
                     t = ev.get("type", "")
                     if t == "orders_initial":
-                        console.print(f"[dim]{ts}[/dim] [cyan]📤 {ev['count']} órdenes BUY colocadas[/cyan]")
+                        console.print(f"[dim]{ts}[/dim] [cyan]📤 {ev['count']} BUY[/cyan]")
                     elif t == "order_filled":
                         side = ev["side"]
                         c = "green" if side == "BUY" else "red"
-                        console.print(f"[dim]{ts}[/dim] [{c}]📥 {side} ejecutada @ ${ev['price']:,.2f} x {ev['qty']:.6f}[/{c}]")
+                        console.print(f"[dim]{ts}[/dim] [{c}]📥 {side} ${ev['price']:,.2f}×{ev['qty']:.6f}[/{c}]")
                     elif t == "order_placed":
                         side = ev["side"]
                         c = "green" if side == "BUY" else "red"
-                        console.print(f"[dim]{ts}[/dim] [{c}]📤 Orden {side} colocada @ ${ev['price']:,.2f}[/{c}]")
+                        console.print(f"[dim]{ts}[/dim] [{c}]📤 {side} ${ev['price']:,.2f}[/{c}]")
                     elif t == "trade_profit":
                         profit = ev["profit"]
+                        session_realized_pnl += profit
                         save_realized_pnl(conn, ev["buy"], ev["sell"], ev["qty"], profit)
                         pc = "green" if profit >= 0 else "red"
                         console.print(
-                            f"[dim]{ts}[/dim] [bold {pc}]✅ Trade: ${profit:+,.2f} "
-                            f"(compra ${ev['buy']:,.0f} → venta ${ev['sell']:,.0f})[/bold {pc}]"
+                            f"[dim]{ts}[/dim] [bold {pc}]✅ ${profit:+,.2f} "
+                            f"(${ev['buy']:,.0f}→${ev['sell']:,.0f})[/bold {pc}]"
+                        )
+                    elif t == "grid_relocated":
+                        console.print(
+                            f"[dim]{ts}[/dim] [cyan]↻ Grid recolocado "
+                            f"${ev['from']:,.2f}→${ev['to']:,.2f} (±{ev['spread_pct']:.1f}%)[/cyan]"
+                        )
+                    elif t == "inventory_skipped":
+                        console.print(
+                            f"[dim]{ts}[/dim] [yellow]⛔ Inventario base "
+                            f"{ev['ratio']*100:.0f}% ≥ máx; sin nuevas BUY[/yellow]"
                         )
                     elif t == "error":
                         console.print(f"[dim]{ts}[/dim] [yellow]⚠ {ev['msg']}[/yellow]")
@@ -543,26 +635,38 @@ def main() -> None:
                 bot_notional_in_orders = get_open_orders_notional_usdt(prev_orders)
                 bot_capital_free = max(selected_capital_usdt - bot_notional_in_orders, 0.0)
                 pnl_historico = get_historical_realized_pnl(conn)
-                trades_volume_usdt = get_historical_trades_volume_usdt(conn)
-                stop_loss_value = initial_value * (1 - STOP_LOSS_PCT)
+                stop_portfolio_floor = initial_value * (1 - STOP_LOSS_PCT)
+                usdt_bal = get_balance_usdt(client)
+                base_bal = get_balance_eth(client)
+                sl_base_price = base_price_at_portfolio_usdt(
+                    usdt_bal, base_bal, stop_portfolio_floor
+                )
                 trend = "Alcista" if not is_bearish else "Bajista"
                 pnl_color_open = "[green]" if pnl_historico >= 0 else "[red]"
                 pnl_color_close = "[/green]" if pnl_historico >= 0 else "[/red]"
                 pnl_sign = "+" if pnl_historico >= 0 else "-"
                 pnl_abs = abs(pnl_historico)
-                trend_short = "Alz" if not is_bearish else "Baj"
+                ses_color_open = "[green]" if session_realized_pnl >= 0 else "[red]"
+                ses_color_close = "[/green]" if session_realized_pnl >= 0 else "[/red]"
+                ses_sign = "+" if session_realized_pnl >= 0 else "-"
+                ses_abs = abs(session_realized_pnl)
+                trend_short = "Alzista" if not is_bearish else "Bajista"
+                if sl_base_price is not None:
+                    sl_part = f"SL {BASE_ASSET}:${sl_base_price:,.2f}"
+                else:
+                    sl_part = "SL: —"
                 console.print(
-                    f"[dim]{ts}[/dim] ${price:,.2f} | ADX {adx:.0f} {trend_short} | "
-                    f"B{buy_orders}/S{sell_orders} | "
-                    f"Bot:${selected_capital_usdt:,.0f} O:${bot_notional_in_orders:,.0f} L:${bot_capital_free:,.0f} | "
-                    f"Vol:${trades_volume_usdt:,.0f} | "
-                    f"PnL:{pnl_color_open}{pnl_sign}${pnl_abs:,.2f}{pnl_color_close} | "
-                    f"SL:${stop_loss_value:,.0f}"
+                    f"[dim]{ts}[/dim] ${price:,.2f} |{adx:.0f}{trend_short:,.0f} |Grid±{spread_pct:.0f}% |"
+                    f"Buy{buy_orders:,.0f}/Sell{sell_orders:,.0f} |"
+                    f"Capital${selected_capital_usdt:,.0f}/{bot_notional_in_orders:,.0f} |"
+                    f"Ganancia{ses_color_open}{ses_sign}${ses_abs:,.2f}{ses_color_close} |"
+                    f"PnL{pnl_color_open}{pnl_sign}${pnl_abs:,.2f}{pnl_color_close} |"
+                    f"{sl_part}"
                 )
                 if check_stop_loss(initial_value, current_value):
                     console.print(
-                        f"[dim]{ts}[/dim] [bold red]🛑 Stop loss activado — Portfolio ${current_value:,.2f} "
-                        f"< {STOP_LOSS_PCT*100:.0f}% desde inicio. Cancelando órdenes.[/bold red]"
+                        f"[dim]{ts}[/dim] [bold red]🛑 Stop loss: portfolio ${current_value:,.2f} "
+                        f"<{STOP_LOSS_PCT*100:.0f}% inicio; cancelando órdenes.[/bold red]"
                     )
                     for oid in list(prev_orders.keys()):
                         try:
@@ -570,9 +674,9 @@ def main() -> None:
                         except Exception:
                             pass
                     break
-
+                    
             except Exception as e:
-                console.print(f"[dim]{datetime.now().strftime('%H:%M:%S')}[/dim] [red]❌ Error: {e}[/red]")
+                console.print(f"[dim]{datetime.now().strftime('%H:%M')}[/dim] [red]❌ Error: {e}[/red]")
 
             time.sleep(LOOP_INTERVAL_SEC)
     except KeyboardInterrupt:

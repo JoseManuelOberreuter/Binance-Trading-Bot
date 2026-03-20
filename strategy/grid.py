@@ -5,8 +5,18 @@ from dataclasses import dataclass, field
 from config import (
     CAPITAL_USDT,
     FEE_RATE,
+    GRID_ADAPTIVE,
+    GRID_ADX_SIDEWAYS_MAX,
+    GRID_ADX_STRONG_TREND,
+    GRID_ATR_SPREAD_MULT,
+    GRID_GEOMETRIC,
     GRID_LEVELS,
     GRID_LOWER,
+    GRID_SIDEWAYS_SPREAD_SCALE,
+    GRID_SPREAD_MAX_PCT,
+    GRID_SPREAD_MIN_PCT,
+    GRID_SPREAD_PCT,
+    GRID_STRONG_TREND_SPREAD_SCALE,
     GRID_UPPER,
     MAX_ORDER_SIZE,
     get_grid_bounds,
@@ -48,28 +58,31 @@ class SimulationResult:
     final_capital: float = 0.0
 
 
-def compute_grid_levels(
-    current_price: float | None = None,
-    lower: float | None = None,
-    upper: float | None = None,
-    n_levels: int | None = None,
-) -> list[GridLevel]:
+def compute_adaptive_spread_pct(atr_pct: float, adx: float, is_bearish: bool) -> float:
     """
-    Compute all grid levels (buy/sell prices).
-    If current_price is given and GRID_SPREAD_PCT > 0, uses dynamic range (price ± spread).
-    Otherwise uses fixed lower/upper from config or params.
+    Half-range (±) spread percent around spot for dynamic grid bounds.
+    Couples width to ATR (volatility) and scales slightly for sideways vs strong trend.
     """
-    if lower is not None and upper is not None:
-        low, up = lower, upper
-    elif current_price is not None and current_price > 0:
-        low, up = get_grid_bounds(current_price)
-    else:
-        low, up = GRID_LOWER, GRID_UPPER
-    n = n_levels if n_levels is not None else GRID_LEVELS
+    if not GRID_ADAPTIVE:
+        return GRID_SPREAD_PCT
+
+    raw = max(
+        GRID_SPREAD_MIN_PCT,
+        min(GRID_SPREAD_MAX_PCT, atr_pct * GRID_ATR_SPREAD_MULT),
+    )
+    if adx < GRID_ADX_SIDEWAYS_MAX:
+        raw *= GRID_SIDEWAYS_SPREAD_SCALE
+    elif adx > GRID_ADX_STRONG_TREND:
+        raw *= GRID_STRONG_TREND_SPREAD_SCALE
+        if is_bearish:
+            raw *= 0.96
+    return max(GRID_SPREAD_MIN_PCT, min(GRID_SPREAD_MAX_PCT, raw))
+
+
+def _levels_linear(low: float, up: float, n: int) -> list[GridLevel]:
     step = (up - low) / n if n > 0 else 0
     if step <= 0:
         return []
-
     levels = []
     for i in range(n):
         buy_price = low + i * step
@@ -78,6 +91,49 @@ def compute_grid_levels(
             sell_price = up
         levels.append(GridLevel(index=i, buy_price=buy_price, sell_price=sell_price))
     return levels
+
+
+def _levels_geometric(low: float, up: float, n: int) -> list[GridLevel]:
+    """Equal multiplicative spacing between adjacent buy prices (constant % step in price)."""
+    if n < 1 or low <= 0 or up <= low:
+        return []
+    ratio = (up / low) ** (1.0 / n)
+    levels = []
+    for i in range(n):
+        buy_price = low * (ratio**i)
+        sell_price = min(low * (ratio ** (i + 1)), up)
+        levels.append(GridLevel(index=i, buy_price=buy_price, sell_price=sell_price))
+    return levels
+
+
+def compute_grid_levels(
+    current_price: float | None = None,
+    lower: float | None = None,
+    upper: float | None = None,
+    n_levels: int | None = None,
+    spread_pct: float | None = None,
+    *,
+    geometric: bool | None = None,
+) -> list[GridLevel]:
+    """
+    Compute all grid levels (buy/sell prices).
+    If current_price is given and GRID_SPREAD_PCT > 0, uses dynamic range (price ± spread).
+    spread_pct overrides default half-range when set (adaptive engine).
+    Explicit lower/upper (e.g. simulation) skips spread_pct.
+    geometric: if True, equal % steps between levels; else equal $ width (legacy).
+    """
+    use_geo = GRID_GEOMETRIC if geometric is None else geometric
+
+    if lower is not None and upper is not None:
+        low, up = lower, upper
+    elif current_price is not None and current_price > 0:
+        low, up = get_grid_bounds(current_price, spread_pct=spread_pct)
+    else:
+        low, up = GRID_LOWER, GRID_UPPER
+    n = n_levels if n_levels is not None else GRID_LEVELS
+    if use_geo:
+        return _levels_geometric(low, up, n)
+    return _levels_linear(low, up, n)
 
 
 def run_grid_simulation(
