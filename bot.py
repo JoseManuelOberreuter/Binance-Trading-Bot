@@ -656,7 +656,7 @@ def main() -> None:
                 else:
                     sl_part = "SL: —"
                 console.print(
-                    f"[dim]{ts}[/dim] ${price:,.2f} |{adx:.0f}{trend_short:,.0f} |Grid±{spread_pct:.0f}% |"
+                    f"[dim]{ts}[/dim] ${price:,.2f} |{adx:.0f} {trend_short} |Grid±{spread_pct:.0f}% |"
                     f"Buy{buy_orders:,.0f}/Sell{sell_orders:,.0f} |"
                     f"Capital${selected_capital_usdt:,.0f}/{bot_notional_in_orders:,.0f} |"
                     f"Ganancia{ses_color_open}{ses_sign}${ses_abs:,.2f}{ses_color_close} |"
