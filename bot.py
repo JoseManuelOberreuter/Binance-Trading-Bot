@@ -15,6 +15,7 @@ from ta.volatility import AverageTrueRange
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 from rich import box
 from rich.prompt import Confirm, FloatPrompt, IntPrompt
 
@@ -363,6 +364,46 @@ def pre_start_setup(client, current_price: float, min_notional: float) -> tuple[
     return True, selected_capital, selected_grids
 
 
+def print_startup_grid_plan(
+    levels: list,
+    spot: float,
+    capital_usdt: float,
+    n_levels: int,
+) -> None:
+    """Print Rich table: per-level buy/sell, ~USDT per order, startup BUY only below spot."""
+    if not levels or n_levels < 1:
+        return
+    usdt_per = min(capital_usdt / n_levels, MAX_ORDER_SIZE)
+    table = Table(
+        title=f"Plan por nivel — {n_levels} grids · ~${usdt_per:,.2f} USDT/orden",
+        box=box.SIMPLE,
+        highlight=True,
+    )
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Compra limit", justify="right")
+    table.add_column("Venta limit", justify="right")
+    table.add_column("~USDT", justify="right", style="cyan")
+    table.add_column("Al inicio", justify="center")
+
+    for lv in levels:
+        places_buy = lv.buy_price < spot
+        ini = "[green]COMPRA[/green]" if places_buy else "—"
+        table.add_row(
+            str(lv.index + 1),
+            f"${lv.buy_price:,.2f}",
+            f"${lv.sell_price:,.2f}",
+            f"${usdt_per:,.2f}",
+            ini,
+        )
+
+    console.print(table)
+    console.print(
+        "[dim]Al inicio solo se envían COMPRAS por debajo del precio spot; "
+        "al ejecutarse una compra se coloca la venta de ese nivel. "
+        "Cantidades reales respetan min notional y step del exchange.[/dim]"
+    )
+
+
 def run_bot_cycle(
     client,
     levels: list,
@@ -511,10 +552,6 @@ def main() -> None:
         return
 
     current_price = float(client.get_symbol_ticker(symbol=SYMBOL)["price"])
-    adx0, plus_di0, minus_di0, atr0 = get_indicators_1h(client)
-    is_b0 = minus_di0 > plus_di0
-    spread0 = compute_adaptive_spread_pct(atr0, adx0, is_b0)
-    bounds = get_grid_bounds(current_price, spread_pct=spread0)
     tick_size, step_size, min_notional = get_symbol_filters(client)
     prev_orders: dict = {}
     conn = sqlite3.connect(TRADES_DB)
@@ -527,17 +564,29 @@ def main() -> None:
         conn.close()
         return
 
+    spot = float(client.get_symbol_ticker(symbol=SYMBOL)["price"])
+    adx_s, plus_s, minus_s, atr_s = get_indicators_1h(client)
+    is_bear_s = minus_s > plus_s
+    spread_start = compute_adaptive_spread_pct(atr_s, adx_s, is_bear_s)
+    bounds_s = get_grid_bounds(spot, spread_pct=spread_start)
+    levels_start = compute_grid_levels(
+        current_price=spot,
+        n_levels=selected_grid_levels,
+        spread_pct=spread_start,
+    )
+
     console.print(Panel(
         f"[bold]Grid Bot — {SYMBOL}[/bold]\n"
-        f"Precio: ${current_price:,.2f} | Rango ${bounds[0]:,.0f}-${bounds[1]:,.0f} (±{spread0:.1f}%)\n"
+        f"Precio: ${spot:,.2f} | Rango ${bounds_s[0]:,.0f}-${bounds_s[1]:,.0f} (±{spread_start:.1f}%)\n"
         f"{selected_grid_levels} niveles | Capital ${selected_capital_usdt:,.2f} | Loop {LOOP_INTERVAL_SEC}s",
         box=box.DOUBLE_EDGE,
         style="bold blue",
     ))
+    print_startup_grid_plan(levels_start, spot, selected_capital_usdt, selected_grid_levels)
     console.print("[dim]Ctrl+C para detener[/dim]")
 
     session_realized_pnl = 0.0  # Sum of closed-trade profit since this run (matches ✅ Trade lines).
-    grid_anchor = float(client.get_symbol_ticker(symbol=SYMBOL)["price"])
+    grid_anchor = spot
     last_relocate_ts = time.time()
 
     try:
@@ -599,24 +648,76 @@ def main() -> None:
                 for ev in cycle_events:
                     t = ev.get("type", "")
                     if t == "orders_initial":
-                        console.print(f"[dim]{ts}[/dim] [cyan]📤 {ev['count']} BUY[/cyan]")
+                        console.print(
+                            f"[dim]{ts}[/dim] [cyan]📤 Inicio: {ev['count']} órdenes límite de COMPRA "
+                            f"(por debajo del spot, grid {SYMBOL})[/cyan]"
+                        )
                     elif t == "order_filled":
                         side = ev["side"]
-                        c = "green" if side == "BUY" else "red"
-                        console.print(f"[dim]{ts}[/dim] [{c}]📥 {side} ${ev['price']:,.2f}×{ev['qty']:.6f}[/{c}]")
+                        p, q = ev["price"], ev["qty"]
+                        approx_usdt = p * q
+                        if side == "BUY":
+                            console.print(
+                                f"[dim]{ts}[/dim] [bold green]📥 Compra ejecutada[/bold green] "
+                                f"[dim]—[/dim] [green]{BASE_ASSET}[/green] a "
+                                f"[green]${p:,.2f}[/green] × [green]{q:.6f}[/green] "
+                                f"[dim](~${approx_usdt:,.2f} USDT)[/dim]"
+                            )
+                        else:
+                            console.print(
+                                f"[dim]{ts}[/dim] [bold red]📥 Venta ejecutada[/bold red] "
+                                f"[dim]—[/dim] [red]{BASE_ASSET}[/red] a "
+                                f"[red]${p:,.2f}[/red] × [red]{q:.6f}[/red] "
+                                f"[dim](~${approx_usdt:,.2f} USDT)[/dim]"
+                            )
                     elif t == "order_placed":
                         side = ev["side"]
-                        c = "green" if side == "BUY" else "red"
-                        console.print(f"[dim]{ts}[/dim] [{c}]📤 {side} ${ev['price']:,.2f}[/{c}]")
+                        p, q = ev["price"], ev["qty"]
+                        approx_usdt = p * q
+                        if side == "BUY":
+                            console.print(
+                                f"[dim]{ts}[/dim] [cyan]📤 Orden límite de COMPRA colocada[/cyan] "
+                                f"[dim]—[/dim] recomprar [cyan]{BASE_ASSET}[/cyan] @ "
+                                f"[cyan]${p:,.2f}[/cyan] × [cyan]{q:.6f}[/cyan] "
+                                f"[dim](~${approx_usdt:,.2f} USDT)[/dim]"
+                            )
+                        else:
+                            console.print(
+                                f"[dim]{ts}[/dim] [magenta]📤 Orden límite de VENTA colocada[/magenta] "
+                                f"[dim]—[/dim] vender [magenta]{BASE_ASSET}[/magenta] @ "
+                                f"[magenta]${p:,.2f}[/magenta] × [magenta]{q:.6f}[/magenta] "
+                                f"[dim](take-profit del nivel del grid)[/dim]"
+                            )
                     elif t == "trade_profit":
                         profit = ev["profit"]
+                        buy_p, sell_p, qty_t = ev["buy"], ev["sell"], ev["qty"]
                         session_realized_pnl += profit
-                        save_realized_pnl(conn, ev["buy"], ev["sell"], ev["qty"], profit)
+                        save_realized_pnl(conn, buy_p, sell_p, qty_t, profit)
                         pc = "green" if profit >= 0 else "red"
-                        console.print(
-                            f"[dim]{ts}[/dim] [bold {pc}]✅ ${profit:+,.2f} "
-                            f"(${ev['buy']:,.0f}→${ev['sell']:,.0f})[/bold {pc}]"
+                        level_spread_pct = (
+                            (sell_p - buy_p) / buy_p * 100.0 if buy_p else 0.0
                         )
+                        if profit >= 0:
+                            console.print(
+                                f"[dim]{ts}[/dim] [bold {pc}]🎉 ¡Trade cerrado en el grid! "
+                                f"+${profit:,.2f} USDT de ganancia neta[/bold {pc}]"
+                            )
+                            console.print(
+                                f"[dim]{ts}[/dim] [{pc}]   💰 Compraste {BASE_ASSET} a "
+                                f"${buy_p:,.2f} → vendiste a ${sell_p:,.2f} "
+                                f"({qty_t:.6f} {BASE_ASSET}; spread del nivel ~{level_spread_pct:.2f}%). "
+                                f"Acumulado sesión: [bold]{session_realized_pnl:+,.2f} USDT[/bold][/{pc}]"
+                            )
+                        else:
+                            console.print(
+                                f"[dim]{ts}[/dim] [bold {pc}]📉 Trade cerrado: "
+                                f"${profit:,.2f} USDT (compra ${buy_p:,.2f} → venta ${sell_p:,.2f}, "
+                                f"{qty_t:.6f} {BASE_ASSET})[/bold {pc}]"
+                            )
+                            console.print(
+                                f"[dim]{ts}[/dim] [{pc}]   Acumulado sesión: "
+                                f"[bold]{session_realized_pnl:+,.2f} USDT[/bold][/{pc}]"
+                            )
                     elif t == "grid_relocated":
                         console.print(
                             f"[dim]{ts}[/dim] [cyan]↻ Grid recolocado "

@@ -41,18 +41,19 @@ BASE_ASSET = SYMBOL.replace("USDT", "")
 QUOTE_ASSET = "USDT"
 
 # Grid (dynamic: based on current price ± spread_pct; see GRID_ADAPTIVE)
-GRID_SPREAD_PCT = get_float("GRID_SPREAD_PCT", 15)
+# Half-range %: band is [price*(1-sp/100), price*(1+sp/100)]. Keep MAX moderate so limit buys are not absurdly far below spot.
+GRID_SPREAD_PCT = get_float("GRID_SPREAD_PCT", 10)
 GRID_LEVELS = get_int("GRID_LEVELS", 20)
 CAPITAL_USDT = get_float("CAPITAL_USDT", 500)
 
 # Adaptive grid: ATR-based half-range %, regime scaling, geometric levels
 GRID_ADAPTIVE = get_bool("GRID_ADAPTIVE", True)
-GRID_SPREAD_MIN_PCT = get_float("GRID_SPREAD_MIN_PCT", 5)
-GRID_SPREAD_MAX_PCT = get_float("GRID_SPREAD_MAX_PCT", 38)
-GRID_ATR_SPREAD_MULT = get_float("GRID_ATR_SPREAD_MULT", 5.0)
+GRID_SPREAD_MIN_PCT = get_float("GRID_SPREAD_MIN_PCT", 6)
+GRID_SPREAD_MAX_PCT = get_float("GRID_SPREAD_MAX_PCT", 10)
+GRID_ATR_SPREAD_MULT = get_float("GRID_ATR_SPREAD_MULT", 3.0)
 GRID_ADX_SIDEWAYS_MAX = get_float("GRID_ADX_SIDEWAYS_MAX", 28)
 GRID_ADX_STRONG_TREND = get_float("GRID_ADX_STRONG_TREND", 32)
-GRID_SIDEWAYS_SPREAD_SCALE = get_float("GRID_SIDEWAYS_SPREAD_SCALE", 1.06)
+GRID_SIDEWAYS_SPREAD_SCALE = get_float("GRID_SIDEWAYS_SPREAD_SCALE", 1.03)
 GRID_STRONG_TREND_SPREAD_SCALE = get_float("GRID_STRONG_TREND_SPREAD_SCALE", 0.82)
 GRID_GEOMETRIC = get_bool("GRID_GEOMETRIC", True)
 # Max share of portfolio in base asset (0–100) before skipping new BUY ladder placement

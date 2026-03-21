@@ -6,3 +6,4 @@ logs/
 .vscode/
 .pytest_cache/
 .pytest_cache/
+trades.db

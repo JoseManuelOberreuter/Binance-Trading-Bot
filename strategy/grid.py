@@ -61,7 +61,8 @@ class SimulationResult:
 def compute_adaptive_spread_pct(atr_pct: float, adx: float, is_bearish: bool) -> float:
     """
     Half-range (±) spread percent around spot for dynamic grid bounds.
-    Couples width to ATR (volatility) and scales slightly for sideways vs strong trend.
+    Clamped to GRID_SPREAD_MIN_PCT..GRID_SPREAD_MAX_PCT so the grid stays tradeable
+    (avoids limit buys far below spot when MAX is moderate).
     """
     if not GRID_ADAPTIVE:
         return GRID_SPREAD_PCT
