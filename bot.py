@@ -736,13 +736,6 @@ def main() -> None:
                 bot_notional_in_orders = get_open_orders_notional_usdt(prev_orders)
                 bot_capital_free = max(selected_capital_usdt - bot_notional_in_orders, 0.0)
                 pnl_historico = get_historical_realized_pnl(conn)
-                stop_portfolio_floor = initial_value * (1 - STOP_LOSS_PCT)
-                usdt_bal = get_balance_usdt(client)
-                base_bal = get_balance_eth(client)
-                sl_base_price = base_price_at_portfolio_usdt(
-                    usdt_bal, base_bal, stop_portfolio_floor
-                )
-                trend = "Alcista" if not is_bearish else "Bajista"
                 pnl_color_open = "[green]" if pnl_historico >= 0 else "[red]"
                 pnl_color_close = "[/green]" if pnl_historico >= 0 else "[/red]"
                 pnl_sign = "+" if pnl_historico >= 0 else "-"
@@ -752,10 +745,8 @@ def main() -> None:
                 ses_sign = "+" if session_realized_pnl >= 0 else "-"
                 ses_abs = abs(session_realized_pnl)
                 trend_short = "Alzista" if not is_bearish else "Bajista"
-                if sl_base_price is not None:
-                    sl_part = f"SL {BASE_ASSET}:${sl_base_price:,.2f}"
-                else:
-                    sl_part = "SL: —"
+                sl_pct = STOP_LOSS_PCT * 100.0
+                sl_part = f"SL −{sl_pct:.0f}%"
                 console.print(
                     f"[dim]{ts}[/dim] ${price:,.2f} |{adx:.0f} {trend_short} |Grid±{spread_pct:.0f}% |"
                     f"Buy{buy_orders:,.0f}/Sell{sell_orders:,.0f} |"
@@ -766,8 +757,8 @@ def main() -> None:
                 )
                 if check_stop_loss(initial_value, current_value):
                     console.print(
-                        f"[dim]{ts}[/dim] [bold red]🛑 Stop loss: portfolio ${current_value:,.2f} "
-                        f"<{STOP_LOSS_PCT*100:.0f}% inicio; cancelando órdenes.[/bold red]"
+                        f"[dim]{ts}[/dim] [bold red]🛑 Stop loss −{STOP_LOSS_PCT*100:.0f}%: "
+                        f"portfolio ${current_value:,.2f}; cancelando órdenes.[/bold red]"
                     )
                     for oid in list(prev_orders.keys()):
                         try:
