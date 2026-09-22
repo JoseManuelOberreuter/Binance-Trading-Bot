@@ -1,4 +1,6 @@
-# Binance Grid Trading Bot
+# Binance Grid Trading Bot (legacy — spot)
+
+> **Legacy.** This is the original spot grid-trading bot, kept as-is and no longer under active development. Active development has moved to `xrp_futures/` at the repo root (Binance USDⓈ-M Futures, trend/momentum/volatility-targeting on XRPUSDT). This bot still runs unchanged from `legacy/spot_grid_bot/`.
 
 Grid trading bot for ETH/USDT on Binance. Uses a dynamic grid that adapts to the current price (± percentage).
 
@@ -6,11 +8,14 @@ Grid trading bot for ETH/USDT on Binance. Uses a dynamic grid that adapts to the
 
 ## Setup
 
+Run all commands below from this directory (`legacy/spot_grid_bot/`):
+
 ```bash
-pip install -r requirements.txt
+cd legacy/spot_grid_bot
+pip install -r ../../requirements.txt
 ```
 
-Create a `.env` file with your Binance API keys and configuration (see Configuration section below).
+Uses the `.env` file at the repo root for your Binance API keys and configuration (see Configuration section below) — `python-dotenv` finds it automatically by walking up from this directory.
 
 ---
 
@@ -88,7 +93,7 @@ Press **Ctrl+C** to stop.
 ## Project structure
 
 ```
-binance-trading/
+legacy/spot_grid_bot/
 ├── bot.py           # Main trading bot
 ├── stats.py         # Account statistics & indicators
 ├── simulate.py      # Backtest simulation

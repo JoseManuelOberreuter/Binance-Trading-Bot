@@ -4,8 +4,8 @@ Places and manages limit orders on Binance (Testnet or Production).
 """
 
 import os
-import sqlite3
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -41,7 +41,7 @@ load_dotenv()
 console = Console()
 
 LOOP_INTERVAL_SEC = 60
-TRADES_DB = Path("logs/trades.db")
+TRADES_XML = Path("logs/trades.xml")
 
 
 def get_indicators_1h(client) -> tuple[float, float, float, float]:
@@ -125,82 +125,45 @@ def ensure_min_notional(
     return round_up_to_step(min_qty, step_size)
 
 
-def init_db() -> None:
+def _load_trades_root() -> ET.Element:
+    if TRADES_XML.exists() and TRADES_XML.stat().st_size > 0:
+        try:
+            tree = ET.parse(TRADES_XML)
+            root = tree.getroot()
+            if root is not None and root.tag == "trades":
+                return root
+        except ET.ParseError:
+            pass
+    return ET.Element("trades")
+
+
+def _write_trades_xml(root: ET.Element) -> None:
     Path("logs").mkdir(exist_ok=True)
-    conn = sqlite3.connect(TRADES_DB)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id TEXT,
-            symbol TEXT,
-            side TEXT,
-            price REAL,
-            qty REAL,
-            quote_qty REAL,
-            commission REAL,
-            commission_asset TEXT,
-            timestamp TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS realized_pnl (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            buy_price REAL,
-            sell_price REAL,
-            qty REAL,
-            profit REAL,
-            timestamp TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+    tree = ET.ElementTree(root)
+    ET.indent(tree, space="  ")
+    tree.write(TRADES_XML, encoding="utf-8", xml_declaration=True)
 
 
-def save_trade(conn: sqlite3.Connection, trade: dict) -> None:
-    conn.execute(
-        "INSERT INTO trades (order_id, symbol, side, price, qty, quote_qty, commission, commission_asset, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            str(trade.get("orderId", "")),
-            trade.get("symbol", SYMBOL),
-            trade.get("side", ""),
-            float(trade.get("price", 0)),
-            float(trade.get("qty", 0)),
-            float(trade.get("quoteQty", 0)),
-            float(trade.get("commission", 0)),
-            trade.get("commissionAsset", ""),
-            datetime.now(timezone.utc).isoformat(),
-        ),
-    )
-    conn.commit()
+def init_trades_log() -> None:
+    Path("logs").mkdir(exist_ok=True)
+    if not TRADES_XML.exists() or TRADES_XML.stat().st_size == 0:
+        _write_trades_xml(ET.Element("trades"))
 
 
-def save_realized_pnl(
-    conn: sqlite3.Connection,
-    buy_price: float,
-    sell_price: float,
-    qty: float,
-    profit: float,
-) -> None:
-    """Persist realized profit from a completed grid cycle."""
-    conn.execute(
-        "INSERT INTO realized_pnl (buy_price, sell_price, qty, profit, timestamp) VALUES (?, ?, ?, ?, ?)",
-        (
-            float(buy_price),
-            float(sell_price),
-            float(qty),
-            float(profit),
-            datetime.now(timezone.utc).isoformat(),
-        ),
-    )
-    conn.commit()
-
-
-def get_historical_realized_pnl(conn: sqlite3.Connection) -> float:
-    """Return cumulative realized PnL from DB."""
-    row = conn.execute("SELECT COALESCE(SUM(profit), 0) FROM realized_pnl").fetchone()
-    if not row:
-        return 0.0
-    return float(row[0] or 0.0)
+def save_trade(trade: dict) -> None:
+    root = _load_trades_root()
+    qty = float(trade.get("executedQty") or trade.get("qty") or 0)
+    el = ET.SubElement(root, "trade")
+    el.set("order_id", str(trade.get("orderId", "")))
+    el.set("symbol", str(trade.get("symbol", SYMBOL)))
+    el.set("side", str(trade.get("side", "")))
+    el.set("price", str(float(trade.get("price", 0))))
+    el.set("qty", str(qty))
+    el.set("quote_qty", str(float(trade.get("cummulativeQuoteQty") or trade.get("quoteQty") or 0)))
+    el.set("commission", str(float(trade.get("commission", 0))))
+    el.set("commission_asset", str(trade.get("commissionAsset", "")))
+    el.set("timestamp", datetime.now(timezone.utc).isoformat())
+    _write_trades_xml(root)
 
 
 def get_balance_usdt(client) -> float:
@@ -412,7 +375,6 @@ def run_bot_cycle(
     min_notional: float,
     capital_usdt: float,
     prev_orders: dict,
-    conn: sqlite3.Connection,
     max_base_inventory_pct: float,
 ) -> tuple[dict, list]:
     """Run one bot cycle. Returns (prev_orders, events). Events are dicts with type, ..."""
@@ -445,7 +407,7 @@ def run_bot_cycle(
             try:
                 filled = client.get_order(symbol=SYMBOL, orderId=oid)
                 if filled["status"] == "FILLED":
-                    save_trade(conn, filled)
+                    save_trade(filled)
                     side = filled["side"]
                     price = float(filled["price"])
                     qty = float(filled["executedQty"])
@@ -543,7 +505,7 @@ def main() -> None:
     if env != "testnet":
         console.print("[bold yellow]Advertencia: ENVIRONMENT no es 'testnet'. Para producción usa con cuidado.[/bold yellow]")
 
-    init_db()
+    init_trades_log()
 
     try:
         client = get_client()
@@ -554,14 +516,12 @@ def main() -> None:
     current_price = float(client.get_symbol_ticker(symbol=SYMBOL)["price"])
     tick_size, step_size, min_notional = get_symbol_filters(client)
     prev_orders: dict = {}
-    conn = sqlite3.connect(TRADES_DB)
     initial_value = get_portfolio_value_usdt(client)
     should_start, selected_capital_usdt, selected_grid_levels = pre_start_setup(
         client, current_price, min_notional
     )
     if not should_start:
         console.print("[yellow]Start cancelled by user.[/yellow]")
-        conn.close()
         return
 
     spot = float(client.get_symbol_ticker(symbol=SYMBOL)["price"])
@@ -639,7 +599,6 @@ def main() -> None:
                     min_notional,
                     selected_capital_usdt,
                     prev_orders,
-                    conn,
                     MAX_BASE_INVENTORY_PCT / 100.0,
                 )
                 cycle_events.extend(more_events)
@@ -692,7 +651,6 @@ def main() -> None:
                         profit = ev["profit"]
                         buy_p, sell_p, qty_t = ev["buy"], ev["sell"], ev["qty"]
                         session_realized_pnl += profit
-                        save_realized_pnl(conn, buy_p, sell_p, qty_t, profit)
                         pc = "green" if profit >= 0 else "red"
                         level_spread_pct = (
                             (sell_p - buy_p) / buy_p * 100.0 if buy_p else 0.0
@@ -734,12 +692,6 @@ def main() -> None:
                 current_value = get_portfolio_value_usdt(client)
                 buy_orders, sell_orders = get_open_orders_side_counts(prev_orders)
                 bot_notional_in_orders = get_open_orders_notional_usdt(prev_orders)
-                bot_capital_free = max(selected_capital_usdt - bot_notional_in_orders, 0.0)
-                pnl_historico = get_historical_realized_pnl(conn)
-                pnl_color_open = "[green]" if pnl_historico >= 0 else "[red]"
-                pnl_color_close = "[/green]" if pnl_historico >= 0 else "[/red]"
-                pnl_sign = "+" if pnl_historico >= 0 else "-"
-                pnl_abs = abs(pnl_historico)
                 ses_color_open = "[green]" if session_realized_pnl >= 0 else "[red]"
                 ses_color_close = "[/green]" if session_realized_pnl >= 0 else "[/red]"
                 ses_sign = "+" if session_realized_pnl >= 0 else "-"
@@ -752,7 +704,7 @@ def main() -> None:
                     f"Buy{buy_orders:,.0f}/Sell{sell_orders:,.0f} |"
                     f"Capital${selected_capital_usdt:,.0f}/{bot_notional_in_orders:,.0f} |"
                     f"Ganancia{ses_color_open}{ses_sign}${ses_abs:,.2f}{ses_color_close} |"
-                    f"PnL{pnl_color_open}{pnl_sign}${pnl_abs:,.2f}{pnl_color_close} |"
+                    f"Cuenta${current_value:,.2f} |"
                     f"{sl_part}"
                 )
                 if check_stop_loss(initial_value, current_value):
@@ -773,8 +725,6 @@ def main() -> None:
             time.sleep(LOOP_INTERVAL_SEC)
     except KeyboardInterrupt:
         console.print("\n[dim]Bot detenido por usuario[/dim]")
-    finally:
-        conn.close()
 
 
 if __name__ == "__main__":
