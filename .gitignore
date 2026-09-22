@@ -6,4 +6,6 @@ logs/
 .vscode/
 .pytest_cache/
 .pytest_cache/
-trades.db
+trades.xml
+xrp_futures/data/cache/*.parquet
+xrp_futures/backtest/results/
