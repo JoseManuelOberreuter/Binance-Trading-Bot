@@ -69,9 +69,21 @@ class Trade:
 
 @dataclass
 class BacktestResult:
-    equity_curve: pd.Series  # indexed by open_time
+    equity_curve: pd.Series  # indexed by open_time; REALIZED only (open positions not marked)
     trades: list[Trade]
     bars: pd.DataFrame
+    # Realized equity + unrealized PnL of the open position at each bar's close — what
+    # the account balance actually shows. Drawdowns on the realized curve understate
+    # the real ones (profits given back before a trailing-stop exit never show up).
+    mtm_equity_curve: pd.Series | None = None
+
+
+def as_mark_to_market(result: BacktestResult) -> BacktestResult:
+    """Same result with equity_curve swapped for the mark-to-market curve, so every
+    existing metric/slicing/portfolio function can be run on MTM unchanged."""
+    if result.mtm_equity_curve is None:
+        raise ValueError("result has no mark-to-market curve (not produced by run_backtest)")
+    return BacktestResult(equity_curve=result.mtm_equity_curve, trades=result.trades, bars=result.bars)
 
 
 class _OpenPosition:
@@ -132,6 +144,7 @@ def run_backtest(
 
     equity = config.initial_equity
     equity_curve = np.empty(n)
+    mtm_curve = np.empty(n)
     pos: _OpenPosition | None = None
     trades: list[Trade] = []
     pending_target: int | None = None
@@ -235,11 +248,15 @@ def run_backtest(
         # 4) Decide the target for the NEXT bar from this bar's (causal) signal.
         pending_target = int(bar["signal"])
         equity_curve[i] = equity
+        unrealized = pos.side * (bar["close"] - pos.entry_price) / pos.entry_price * pos.notional if pos is not None else 0.0
+        mtm_curve[i] = equity + unrealized
 
     if pos is not None:
         last = bars.iloc[-1]
         close_position(last["close"], last["open_time"], "end_of_data")
         equity_curve[-1] = equity
+        mtm_curve[-1] = equity
 
     equity_series = pd.Series(equity_curve, index=bars["open_time"], name="equity")
-    return BacktestResult(equity_curve=equity_series, trades=trades, bars=bars)
+    mtm_series = pd.Series(mtm_curve, index=bars["open_time"], name="equity")
+    return BacktestResult(equity_curve=equity_series, trades=trades, bars=bars, mtm_equity_curve=mtm_series)

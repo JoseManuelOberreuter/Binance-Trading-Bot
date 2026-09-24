@@ -156,3 +156,12 @@ def resample_ohlcv(df_1h: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     agg = agg.dropna(subset=["open", "high", "low", "close"]).reset_index()
     agg["close_time"] = agg["open_time"] + pd.Timedelta(rule) - pd.Timedelta(milliseconds=1)
     return agg
+
+
+def read_cached(symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(1h klines, funding) straight from the local cache — no network. Raises if the
+    symbol was never downloaded (run scripts/download_data.py first)."""
+    klines_path, funding_path = _klines_cache_path(symbol), _funding_cache_path(symbol)
+    if not (klines_path.exists() and funding_path.exists()):
+        raise FileNotFoundError(f"{symbol} not cached; run: python -m xrp_futures.scripts.download_data --symbols {symbol}")
+    return pd.read_parquet(klines_path), pd.read_parquet(funding_path)
