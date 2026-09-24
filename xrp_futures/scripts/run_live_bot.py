@@ -21,6 +21,7 @@ from binance.client import Client
 
 from xrp_futures.config.live import DEFAULT
 from xrp_futures.execution.client import PRODUCTION, futures_environment, get_futures_client
+from xrp_futures.execution import events as ev
 from xrp_futures.execution.engine import LiveEngine
 from xrp_futures.execution.live_signal import compute_live_signal, fetch_closed_bars
 from xrp_futures.execution.order_manager import BinanceFuturesExchange, DryRunExchange
@@ -70,6 +71,8 @@ def main() -> None:
              config.equity_override_usdt)
     for symbol in config.universe:
         exchange.setup_symbol(symbol, config.leverage)
+    engine.events.emit(ev.BOT_STARTED, environment=environment, simulated_capital=config.equity_override_usdt,
+                       universe=list(config.universe), risk_pct=config.risk_pct, interval_s=args.interval)
 
     while True:
         try:
@@ -77,8 +80,9 @@ def main() -> None:
             log.info("cycle ok: positions=%s paused=%s bot_paused=%s kill_switch=%s realized_pnl=%+.4f",
                      list(state.positions) or "none", list(state.paused) or "none", state.bot_paused,
                      state.kill_switch.tripped, state.realized_pnl)
-        except Exception:   # never let one bad cycle kill the loop (legacy bot.py pattern)
+        except Exception as e:   # never let one bad cycle kill the loop (legacy bot.py pattern)
             log.exception("cycle failed; retrying next interval")
+            engine.events.emit(ev.CYCLE_ERROR, error=f"{type(e).__name__}: {e}"[:300], retry_s=args.interval)
         if args.once:
             break
         time.sleep(args.interval)

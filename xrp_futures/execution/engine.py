@@ -27,6 +27,7 @@ import pandas as pd
 
 from xrp_futures.config.live import LiveConfig
 from xrp_futures.execution import commands as cmdq
+from xrp_futures.execution import events as ev
 from xrp_futures.execution import reconcile as rc
 from xrp_futures.execution.live_signal import LiveSignal
 from xrp_futures.execution.order_manager import Fill, Snapshot
@@ -60,7 +61,9 @@ class LiveEngine:
         self.filters = filters
         self.store = store
         self.commands = cmdq.CommandQueue(store.dir)
+        self.events = ev.EventLog(store.dir, enabled=not dry_run)
         self.dry_run = dry_run
+        self._candle_actions: dict[str, int] = {}
 
     # ------------------------------------------------------------------ cycle ----
     def cycle(self, now: pd.Timestamp | None = None) -> BotState:
@@ -89,7 +92,21 @@ class LiveEngine:
 
     # ------------------------------------------------------------- candle rules ----
     def _process_candle(self, state: BotState, signals: dict[str, LiveSignal], snap: Snapshot) -> None:
-        log.info("processing candle %s", next(iter(signals.values())).bar_open_time)
+        bar_time = next(iter(signals.values())).bar_open_time
+        log.info("processing candle %s", bar_time)
+        self._candle_actions = {"opened": 0, "closed": 0, "stops_moved": 0, "skipped": 0}
+        self._rules(state, signals, snap)
+        self.events.emit(ev.CANDLE_PROCESSED, bar_open_time=_iso(bar_time),
+                         bar_close_time=_iso(bar_time + pd.Timedelta(self.config.strategy.timeframe)),
+                         signals={s: sig.signal for s, sig in signals.items()},
+                         closes={s: sig.close for s, sig in signals.items()},
+                         actions=self._candle_actions, open_positions=len(state.positions))
+
+    def _count(self, action: str) -> None:
+        if action in self._candle_actions:
+            self._candle_actions[action] += 1
+
+    def _rules(self, state: BotState, signals: dict[str, LiveSignal], snap: Snapshot) -> None:
         for symbol in self.config.universe:          # 1) exits / trailing
             pos = state.positions.get(symbol)
             if pos is None or symbol in state.paused:
@@ -106,6 +123,8 @@ class LiveEngine:
                 continue
             if state.bot_paused:
                 log.info("%s: %s signal, bot paused -> no entry", symbol, "LONG" if sig.signal == 1 else "SHORT")
+                self._count("skipped")
+                self.events.emit(ev.ENTRY_SKIPPED, symbol=symbol, side=sig.signal, reason="bot_paused")
                 continue
             self._enter(state, symbol, sig, snap)
 
@@ -117,6 +136,9 @@ class LiveEngine:
                           state.open_notional(prices), self.config, state.kill_switch.tripped)
         if isinstance(plan, Skip):
             log.info("%s: entry skipped (%s) %s", symbol, plan.reason, plan.detail)
+            self._count("skipped")
+            self.events.emit(ev.ENTRY_SKIPPED, symbol=symbol, side=sig.signal, reason=plan.reason,
+                             target_usdt=plan.target_usdt, limit_usdt=plan.limit_usdt)
             return
 
         fill = self.exchange.market_order(symbol, plan.side, plan.qty, reduce_only=False)
@@ -129,10 +151,16 @@ class LiveEngine:
         self._save(state)   # the position exists on Binance now — persist before anything else can fail
         log.info("%s: OPEN %s %s @ %.6g, stop %s (equity %.2f)", symbol,
                  "LONG" if plan.side == 1 else "SHORT", fill.qty, fill.price, stop, equity)
+        self._count("opened")
+        self.events.emit(ev.POSITION_OPENED, symbol=symbol, side=plan.side, qty=str(fill.qty), price=fill.price,
+                         notional=float(fill.qty) * fill.price, stop=float(stop),
+                         stop_pct=abs(fill.price - float(stop)) / fill.price,
+                         risk_usdt=float(fill.qty) * abs(fill.price - float(stop)), equity=equity)
         try:
             state.positions[symbol].stop_client_order_id = self.exchange.place_stop(symbol, plan.side, fill.qty, stop)
         except Exception as e:  # never leave a position unprotected
-            self._alert(state, symbol, f"stop placement failed after entry ({e}); closing position")
+            self._alert(state, symbol, f"stop placement failed after entry ({e}); closing position",
+                        code="STOP_FAILED")
             self._close(state, symbol, reason="stop_failed")
             state.paused[symbol] = "stop placement failed after entry"
         self._save(state)
@@ -153,6 +181,9 @@ class LiveEngine:
         if pos.stop_client_order_id:
             self.exchange.cancel_stop(symbol, pos.stop_client_order_id)             # ...then the old
         log.info("%s: stop trailed %s -> %s", symbol, current, new)
+        self._count("stops_moved")
+        self.events.emit(ev.STOP_MOVED, symbol=symbol, side=pos.side, old_stop=float(current), new_stop=float(new),
+                         locked_pnl=pos.side * (float(new) - pos.entry_price) * float(Decimal(pos.qty)))
         pos.stop_price, pos.stop_client_order_id = str(new), new_id
         self._save(state)
 
@@ -179,6 +210,13 @@ class LiveEngine:
         del state.positions[pos.symbol]
         if not self.dry_run:
             self.store.append_trade(record)
+        self._count("closed")
+        notional = float(Decimal(pos.qty)) * pos.entry_price
+        hours = ((pd.Timestamp(record["exit_time"]) - pd.Timestamp(pos.entry_time)).total_seconds() / 3600
+                 if record["exit_time"] else None)
+        self.events.emit(ev.POSITION_CLOSED, symbol=pos.symbol, side=pos.side, reason=reason,
+                         entry_price=pos.entry_price, exit_price=record["exit_price"], net_pnl=net,
+                         pnl_pct=(net / notional) if net is not None and notional else None, hours=hours)
         log.info("%s: CLOSED (%s) net %s", pos.symbol, reason, f"{net:+.4f}" if net is not None else "unknown")
         self._save(state)
 
@@ -188,16 +226,18 @@ class LiveEngine:
         if a.kind == rc.PLACE_STOP:
             mark = self.exchange.mark_price(a.symbol)
             if (mark - float(pos.stop_price)) * pos.side <= 0:
-                self._alert(state, a.symbol, f"stop {pos.stop_price} missing and already crossed; closing")
+                self._alert(state, a.symbol, f"stop {pos.stop_price} missing and already crossed; closing",
+                            code="STOP_CROSSED")
                 self._close(state, a.symbol, reason="stop")
                 return
             pos.stop_client_order_id = self.exchange.place_stop(a.symbol, pos.side, Decimal(pos.qty),
                                                                 Decimal(pos.stop_price))
-            self._alert(state, a.symbol, "position had no stop on Binance; stop re-placed")
+            self._alert(state, a.symbol, "position had no stop on Binance; stop re-placed", code="STOP_REPLACED")
         elif a.kind == rc.RECORD_CLOSED:
             fill = self.exchange.stop_fill(a.symbol, pos.stop_client_order_id) if pos.stop_client_order_id else None
             if fill is None:
-                self._alert(state, a.symbol, "position closed on Binance but not by the bot's stop; PnL unknown")
+                self._alert(state, a.symbol, "position closed on Binance but not by the bot's stop; PnL unknown",
+                            code="CLOSED_EXTERNALLY")
             self._record_trade(state, pos, fill, reason="stop")
         elif a.kind in (rc.CANCEL_ORPHAN_STOP, rc.CANCEL_DUPLICATE_STOP):
             self.exchange.cancel_stop(a.symbol, a.client_order_id)
@@ -206,7 +246,8 @@ class LiveEngine:
             pos.stop_client_order_id = a.client_order_id
         elif a.kind == rc.PAUSE_SYMBOL:
             state.paused[a.symbol] = a.detail
-            self._alert(state, a.symbol, f"paused: {a.detail}")
+            self._alert(state, a.symbol, f"paused: {a.detail}",
+                        code="UNKNOWN_POSITION" if "not opened by the bot" in a.detail else "QTY_MISMATCH")
         self._save(state)
 
     # ------------------------------------------------------------- commands -----
@@ -223,6 +264,7 @@ class LiveEngine:
             ok, msg = self._apply_command(state, c, snap)
             results.append({**c, "ok": ok, "message": msg, "applied_at": datetime.now(timezone.utc).isoformat()})
             log.info("command %s %s -> %s", c["kind"], c.get("symbol") or "", msg)
+            self.events.emit(ev.COMMAND_APPLIED, command=c["kind"], symbol=c.get("symbol"), ok=ok)
         self._save(state)
         self.commands.finish(results)
 
@@ -262,7 +304,9 @@ class LiveEngine:
         state.kill_switch.update(equity)
         if state.kill_switch.tripped and not was_tripped:
             self._alert(state, None, f"KILL-SWITCH tripped at equity {equity:.2f} "
-                                     f"({state.kill_switch.drawdown(equity):.1%} from peak): new entries blocked")
+                                     f"({state.kill_switch.drawdown(equity):.1%} from peak): new entries blocked",
+                        emit=False)
+            self.events.emit(ev.KILL_SWITCH, equity=equity, drawdown=state.kill_switch.drawdown(equity))
         state.last_cycle_at = _iso(now)
         if not self.dry_run:
             self.store.append_equity(dict(
@@ -272,10 +316,13 @@ class LiveEngine:
                 open_positions=len(state.positions)))
 
     # --------------------------------------------------------------- helpers ----
-    def _alert(self, state: BotState, symbol: str | None, message: str) -> None:
+    def _alert(self, state: BotState, symbol: str | None, message: str, emit: bool = True,
+               code: str = "GENERIC") -> None:
         log.warning("ALERT %s%s", f"{symbol}: " if symbol else "", message)
         if not self.dry_run:
             self.store.append_alert(dict(time=datetime.now(timezone.utc).isoformat(), symbol=symbol, message=message))
+        if emit:
+            self.events.emit(ev.ALERT, symbol=symbol, code=code, message=message)
 
     def _save(self, state: BotState) -> None:
         if not self.dry_run:

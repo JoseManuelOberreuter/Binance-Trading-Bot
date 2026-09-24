@@ -235,3 +235,40 @@ def test_unknown_position_pauses_symbol_and_is_left_alone(tmp_path):
     ex.position, ex.entry_price = Decimal("-10"), 1.5      # e.g. a manual trade by the user
     state = _engine(tmp_path, ex, sig).cycle(T0)
     assert SYM in state.paused and ex.position == Decimal("-10") and ex.calls == []
+
+
+def test_engine_emits_activity_events(tmp_path):
+    from xrp_futures.execution import events as ev
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)                                              # entry
+    ex.prices[SYM] = 1.60
+    t1 = T0 + pd.Timedelta("12h")
+    sig["sig"] = _signal(1, last_closed_bar_open(t1), ch_long=1.45)
+    eng.cycle(t1)                                              # trail
+    t2 = t1 + pd.Timedelta("12h")
+    sig["sig"] = _signal(0, last_closed_bar_open(t2))
+    eng.cycle(t2)                                              # exit (signal flat)
+    kinds = [e["type"] for e in eng.events.read()]
+    assert kinds == [ev.POSITION_OPENED, ev.CANDLE_PROCESSED, ev.STOP_MOVED, ev.CANDLE_PROCESSED,
+                     ev.POSITION_CLOSED, ev.CANDLE_PROCESSED]
+    opened, _, moved, _, closed, last = eng.events.read()
+    assert opened["risk_usdt"] == pytest.approx(2_000 * 0.003, rel=1e-6)
+    assert moved["old_stop"] == 1.38 and moved["new_stop"] == 1.45
+    assert moved["locked_pnl"] == pytest.approx(50 * (1.45 - 1.50))
+    assert closed["reason"] == "signal" and closed["net_pnl"] > 0
+    assert last["actions"] == {"opened": 0, "closed": 1, "stops_moved": 0, "skipped": 0}
+
+
+def test_skipped_entry_event_once_per_candle_and_dry_run_records_nothing(tmp_path):
+    from xrp_futures.execution import events as ev
+    config = replace(CONFIG, equity_override_usdt=10.0)        # too small for the 5 USDT minimum
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig, config=config)
+    eng.cycle(T0)
+    eng.cycle(T0 + pd.Timedelta(minutes=5))                    # same candle: no repeat
+    skipped = [e for e in eng.events.read() if e["type"] == ev.ENTRY_SKIPPED]
+    assert len(skipped) == 1 and skipped[0]["reason"] == "below_minimum"
+    dry = _engine(tmp_path / "dry", FakeExchange(), sig, dry_run=True)
+    dry.cycle(T0)
+    assert dry.events.read() == []

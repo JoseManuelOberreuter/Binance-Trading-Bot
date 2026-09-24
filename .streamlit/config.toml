@@ -1,0 +1,16 @@
+# Theme for the xrp_futures dashboard (streamlit run xrp_futures/monitor/dashboard.py).
+# Near-monochrome on purpose: color is reserved for gains/losses and warnings.
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#c9ced6"
+backgroundColor = "#0e1014"
+secondaryBackgroundColor = "#161a20"
+textColor = "#e4e6ea"
+font = "sans serif"

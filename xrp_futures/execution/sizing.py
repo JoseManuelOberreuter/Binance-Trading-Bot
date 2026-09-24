@@ -33,6 +33,8 @@ class Skip:
     symbol: str
     reason: str              # "kill_switch" | "invalid_atr" | "below_minimum" | "exposure_cap"
     detail: str = ""
+    target_usdt: float | None = None     # the notional the risk budget allowed
+    limit_usdt: float | None = None      # the exchange minimum or the remaining exposure cap
 
 
 def plan_entry(
@@ -63,12 +65,14 @@ def plan_entry(
 
     qty = filters.qty_for_notional(target, price)
     if qty is None:
-        return Skip(symbol, "below_minimum",
-                    f"target {target:.2f} USDT < min order {filters.min_order_usdt(price):.2f} USDT")
+        minimum = filters.min_order_usdt(price)
+        return Skip(symbol, "below_minimum", f"target {target:.2f} USDT < min order {minimum:.2f} USDT",
+                    target_usdt=target, limit_usdt=minimum)
 
     notional = float(qty) * price
     cap = config.max_total_notional_pct * equity
     if open_notional + notional > cap:
-        return Skip(symbol, "exposure_cap", f"open {open_notional:.2f} + {notional:.2f} > cap {cap:.2f} USDT")
+        return Skip(symbol, "exposure_cap", f"open {open_notional:.2f} + {notional:.2f} > cap {cap:.2f} USDT",
+                    target_usdt=notional, limit_usdt=max(cap - open_notional, 0.0))
 
     return EntryPlan(symbol, side, qty, notional, filters.round_price(stop))

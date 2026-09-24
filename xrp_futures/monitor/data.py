@@ -14,6 +14,7 @@ import pandas as pd
 
 from xrp_futures.config.live import LiveConfig
 from xrp_futures.execution.commands import CommandQueue
+from xrp_futures.execution.events import CANDLE_PROCESSED, EventLog
 from xrp_futures.execution.state import STATE_ROOT, BotState, StateStore
 
 HEARTBEAT_STALE_AFTER = pd.Timedelta(minutes=12)   # bot polls every 5 min; >2 missed cycles = stale
@@ -29,6 +30,14 @@ class BotView:
     commands_done: list[dict]
     commands_pending: list[dict]
     log_tail: list[str]
+    events: list[dict]              # newest last
+
+    def last_event(self, kind: str) -> dict | None:
+        return next((e for e in reversed(self.events) if e["type"] == kind), None)
+
+    @property
+    def last_candle(self) -> dict | None:
+        return self.last_event(CANDLE_PROCESSED)
 
 
 def environments(root: Path = STATE_ROOT) -> list[str]:
@@ -64,6 +73,7 @@ def load(environment: str, config: LiveConfig, root: Path = STATE_ROOT) -> BotVi
         commands_done=queue.history(),
         commands_pending=queue.pending(),
         log_tail=tail(store.dir / "bot.log"),
+        events=EventLog(store.dir).read(limit=500),
     )
 
 

@@ -182,6 +182,60 @@ Módulos:
 Diferencia conocida con el backtest: el backtest entra al precio de apertura
 de la vela; el bot entra hasta ~5 min después (polling) a precio de mercado.
 
+## Fase 5b — rediseño minimalista + bitácora (✅ construido)
+
+Decisiones confirmadas por el usuario:
+24. **Una página + pestañas.** Arriba: línea de estado (🟢 Activo · capital ·
+    PnL · próxima vela en Xh Ym) y línea de espera en vivo. Pestaña
+    **Actividad** (por defecto): bitácora + posiciones compactas con los
+    controles en un **menú plegable** al lado. Pestañas **Historial**
+    (operaciones cerradas), **Capital** (gráfico) y **Configuración** (parámetros,
+    "cómo funciona", log técnico). Se elimina la barra lateral cargada y las
+    5 métricas.
+25. **Bitácora en lenguaje humano, basada en eventos, no en el log.** El
+    motor escribe eventos estructurados en `live_state/<env>/events.jsonl`
+    (`execution/events.py`); el panel los traduce a español
+    (`monitor/messages.py`, funciones puras con tests). `bot.log` queda
+    solo para depurar.
+26. **Espera = línea en vivo arriba**, recalculada cada refresco (no se
+    escribe una entrada por ciclo): "💤 En espera — próxima vela en 2h 13m ·
+    4 posiciones · no realizado +$0.12 · mercado: 7 de 8 alcistas".
+
+27. **Estilo editorial, sin emojis** (elegido por el usuario tras revisar
+    referencias de dashboards de trading casi monocromáticos): tema oscuro
+    neutro (`.streamlit/config.toml`), Inter + números en monoespaciado,
+    color solo en ganancias/pérdidas (verde/rojo) y avisos (ámbar), frases
+    cortas con titular + línea de detalle, sin cabecera ni botón "Deploy".
+    Los mensajes de ejemplo de abajo son del primer borrador (con emojis);
+    el texto vigente está en `monitor/messages.py` y sus tests.
+
+Eventos (tipo → mensaje):
+- `BOT_STARTED` → "▶️ Bot iniciado en testnet con $250 simulados."
+- `CANDLE_PROCESSED` (señales por moneda, acciones) → "🕛 Vela de las 12:00
+  cerrada. Señales: 7 alcistas, 1 bajista. Acciones: 1 stop movido."
+- `POSITION_OPENED` (qty, precio, stop, riesgo) → "🟢 Abrí LONG en XRP: 5.5 a
+  $1.5384 (~$8.46). Stop $1.4028 (-8.8%); si salta pierdo ~$0.75 (0.3%)."
+- `STOP_MOVED` (antes, después, ganancia asegurada) → "🔼 Subí el stop de SOL
+  de $109.44 a $112.10: aseguro +$0.05."
+- `POSITION_CLOSED` (motivo signal/stop/manual, PnL, duración) → "🔵 Cerré BNB
+  por cambio de señal: +$0.42 (+2.7%) en 3 días." / "🔴 Saltó el stop de
+  ADA a $0.2274: -$0.75."
+- `ENTRY_SKIPPED` (motivo, montos) — **una vez por moneda y vela** →
+  "⏭️ BTC con señal LONG, pero la orden mínima ($84) supera lo que
+  corresponde ($17.8)."
+- `COMMAND_APPLIED` → "⏸️ Pausaste el bot desde el panel."
+- `ALERT` / `KILL_SWITCH` → "⚠️ …" / "🛑 Kill-switch activado …"
+- `CYCLE_ERROR` (desde el loop de `run_live_bot`) → "⚠️ No pude conectar con
+  Binance; reintento en 5 min. Tus stops siguen activos en Binance."
+
+Datos para la línea de espera: `last_cycle_at`, posiciones y no realizado del
+último `equity_log`, resumen de señales del último `CANDLE_PROCESSED`, y la
+próxima vela calculada en el panel (00:00/12:00 UTC).
+
+Tests: el motor emite los eventos esperados (Binance falso); cada evento se
+traduce al mensaje esperado; los `ENTRY_SKIPPED` no se repiten dentro de una
+misma vela.
+
 ## Archivos
 
 ```
