@@ -35,7 +35,9 @@ class Position:
     entry_price: float
     entry_time: str               # ISO UTC
     stop_price: str               # current (trailed) stop, Decimal as string
-    stop_client_order_id: str | None = None
+    stop_client_order_id: str | None = None   # clientAlgoId of the exchange-side stop
+    entry_order_id: int | None = None
+    entry_commission: float = 0.0             # USDT, from the entry fills (for exact trade PnL)
 
     @property
     def signed_qty(self) -> Decimal:
@@ -51,6 +53,8 @@ class BotState:
     positions: dict[str, Position] = field(default_factory=dict)
     paused: dict[str, str] = field(default_factory=dict)   # symbol -> reason (needs manual review)
     last_processed_bar: str | None = None      # ISO open_time of the last 12h candle acted on
+    bot_paused: bool = False                   # manual pause: no new entries (stops/exits keep working)
+    last_cycle_at: str | None = None           # ISO UTC heartbeat, read by the dashboard
 
     @classmethod
     def new(cls, environment: str, config: LiveConfig) -> "BotState":
@@ -90,6 +94,7 @@ class StateStore:
         self.state_path = self.dir / "state.json"
         self.trades_path = self.dir / "trades.jsonl"
         self.equity_path = self.dir / "equity_log.jsonl"
+        self.alerts_path = self.dir / "alerts.jsonl"
 
     def load(self, config: LiveConfig) -> BotState:
         if not self.state_path.exists():
@@ -113,6 +118,9 @@ class StateStore:
 
     def append_equity(self, record: dict) -> None:
         self._append(self.equity_path, record)
+
+    def append_alert(self, record: dict) -> None:
+        self._append(self.alerts_path, record)
 
     def _append(self, path: Path, record: dict) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)

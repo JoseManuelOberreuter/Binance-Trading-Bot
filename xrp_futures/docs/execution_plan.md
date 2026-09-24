@@ -147,7 +147,15 @@ Decisiones confirmadas:
     algo, verificar que aparece en `openAlgoOrders`, cancelarlo y cerrar —
     confirma el formato real de las respuestas antes de construir el motor.
 21. **Arranque:** 1 ciclo `--dry-run` revisado juntos, luego testnet real.
-22. **Alertas:** consola + `live_state/<entorno>/bot.log` (Telegram después).
+22. **Alertas:** consola + `live_state/<entorno>/bot.log` + `alerts.jsonl`
+    (Telegram después).
+23. **Frontend de control (Streamlit, después del motor)** — reemplaza el
+    dashboard "solo lectura" de la decisión 12 por uno con 4 operaciones:
+    pausar/reanudar el bot, cerrar una posición, pausar/reanudar una moneda,
+    reactivar el kill-switch. El frontend **no tiene claves ni habla con
+    Binance**: escribe en `live_state/<entorno>/commands.jsonl`
+    (`execution/commands.py`) y el bot los aplica en su siguiente ciclo con
+    sus propias reglas; el resultado queda en `commands_done.jsonl`.
 
 Módulos:
 - `order_manager.py` — `setup_symbol` (margen aislado + 3x; tolera "no need

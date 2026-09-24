@@ -3,7 +3,7 @@ from decimal import Decimal
 from xrp_futures.config.live import LiveConfig
 from xrp_futures.execution.reconcile import (
     ADOPT_STOP, CANCEL_DUPLICATE_STOP, CANCEL_ORPHAN_STOP, PAUSE_SYMBOL, PLACE_STOP, RECORD_CLOSED,
-    ExchangeOrder, ExchangePosition, parse_orders, parse_positions, reconcile,
+    ExchangeOrder, ExchangePosition, parse_algo_orders, parse_positions, reconcile,
 )
 from xrp_futures.execution.state import BotState, Position
 
@@ -84,9 +84,14 @@ def test_paused_symbol_is_left_alone():
 
 def test_parse_binance_payloads():
     positions = parse_positions([
-        {"symbol": "XRPUSDT", "positionAmt": "-12.5", "entryPrice": "1.47"},
+        {"symbol": "XRPUSDT", "positionAmt": "-12.5", "entryPrice": "1.47", "unRealizedProfit": "-0.30"},
         {"symbol": "BNBUSDT", "positionAmt": "0.00", "entryPrice": "0"},
     ])
     assert list(positions) == ["XRPUSDT"] and positions["XRPUSDT"].amt == Decimal("-12.5")
-    orders = parse_orders([{"symbol": "XRPUSDT", "clientOrderId": "xfb_a", "type": "STOP_MARKET", "stopPrice": "1.60"}])
-    assert orders[0].is_bot_stop and orders[0].stop_price == 1.60
+    assert positions["XRPUSDT"].unrealized_pnl == -0.30
+    # Shape copied from a real testnet openAlgoOrders response (probe_testnet_stop.py).
+    orders = parse_algo_orders([{"algoId": 1000000217310157, "clientAlgoId": "xfb_probe_s_1790285426",
+                                 "algoType": "CONDITIONAL", "orderType": "STOP_MARKET", "symbol": "XRPUSDT",
+                                 "side": "SELL", "quantity": "3.9", "algoStatus": "NEW", "triggerPrice": "1.3816",
+                                 "reduceOnly": True, "workingType": "CONTRACT_PRICE"}])
+    assert orders[0].is_bot_stop and orders[0].stop_price == 1.3816

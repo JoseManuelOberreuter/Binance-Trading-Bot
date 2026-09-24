@@ -64,7 +64,13 @@ def check_account(client: Client, environment: str) -> None:
     orders = client.futures_get_open_orders()
     console.print(f"Open orders: {len(orders)}")
     for o in orders:
-        console.print(f"  {o['symbol']:<10} {o['type']:<12} {o['side']:<5} qty={o['origQty']} stop={o.get('stopPrice')}")
+        console.print(f"  {o['symbol']:<10} {o['type']:<12} {o['side']:<5} qty={o['origQty']} id={o['clientOrderId']}")
+    # Stops are algo orders since 2025-12-09 and don't show up in the list above.
+    algo = client.futures_get_open_algo_orders()
+    console.print(f"Open stop (algo) orders: {len(algo)}")
+    for o in algo:
+        console.print(f"  {o['symbol']:<10} {o['orderType']:<12} {o['side']:<5} qty={o['quantity']} "
+                      f"trigger={o['triggerPrice']} id={o['clientAlgoId']}")
 
 
 def check_production_key_permissions(client: Client) -> None:

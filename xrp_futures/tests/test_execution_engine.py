@@ -1,0 +1,237 @@
+"""
+End-to-end engine cycles against an in-memory fake Binance (no network).
+"""
+
+from dataclasses import replace
+from decimal import Decimal
+
+import pandas as pd
+import pytest
+
+from xrp_futures.config.live import LiveConfig
+from xrp_futures.execution import commands as cmdq
+from xrp_futures.execution.engine import LiveEngine, last_closed_bar_open
+from xrp_futures.execution.live_signal import LiveSignal
+from xrp_futures.execution.order_manager import DryRunExchange, Fill, Snapshot
+from xrp_futures.execution.reconcile import ExchangeOrder, ExchangePosition
+from xrp_futures.execution.state import StateStore
+from xrp_futures.execution.symbol_filters import SymbolFilters
+
+SYM = "XRPUSDT"
+CONFIG = replace(LiveConfig(), universe=(SYM,), equity_override_usdt=2_000.0)
+FILTERS = {SYM: SymbolFilters(SYM, Decimal("0.0001"), Decimal("0.1"), Decimal("0.1"), Decimal("5"))}
+T0 = pd.Timestamp("2026-09-24 12:05", tz="UTC")        # 5 min after the 12:00 close -> last closed = 00:00
+
+
+class FakeExchange:
+    def __init__(self, price=1.50):
+        self.prices = {SYM: price}
+        self.position = Decimal("0")             # signed
+        self.entry_price = 0.0
+        self.stops: dict[str, tuple[int, Decimal, Decimal]] = {}   # cid -> (position_side, qty, price)
+        self.triggered: dict[str, Fill] = {}
+        self.calls: list[str] = []
+        self.next_id = 1
+        self.fail_stop = False
+
+    def snapshot(self):
+        positions = {}
+        if self.position != 0:
+            upnl = float(self.position) * (self.prices[SYM] - self.entry_price)
+            positions[SYM] = ExchangePosition(SYM, self.position, self.entry_price, upnl)
+        stops = [ExchangeOrder(SYM, cid, "STOP_MARKET", float(p)) for cid, (_, _, p) in self.stops.items()]
+        return Snapshot(positions, stops, wallet_equity=5_000.0)
+
+    def mark_price(self, symbol):
+        return self.prices[symbol]
+
+    def _fill(self, qty, realized=0.0):
+        self.next_id += 1
+        price = self.prices[SYM]
+        return Fill(self.next_id, price, qty, commission=float(qty) * price * 0.0005, realized_pnl=realized,
+                    time_ms=int(T0.value // 10**6))
+
+    def market_order(self, symbol, side, qty, reduce_only):
+        self.calls.append(f"market {side} {qty} reduce={reduce_only}")
+        realized = 0.0
+        if reduce_only:
+            realized = float(self.position) * (self.prices[SYM] - self.entry_price)
+            self.position = Decimal("0")
+        else:
+            self.position, self.entry_price = side * qty, self.prices[SYM]
+        return self._fill(qty, realized)
+
+    def place_stop(self, symbol, position_side, qty, stop_price):
+        if self.fail_stop:
+            raise RuntimeError("rejected")
+        cid = f"xfb_s_{SYM}_{self.next_id}"
+        self.next_id += 1
+        self.stops[cid] = (position_side, qty, stop_price)
+        self.calls.append(f"stop {stop_price}")
+        return cid
+
+    def cancel_stop(self, symbol, cid):
+        self.calls.append(f"cancel {cid}")
+        self.stops.pop(cid, None)
+
+    def trigger_stop(self, price):
+        """Price hits the stop while the bot is not running."""
+        (cid, (side, qty, _)), = self.stops.items()
+        self.prices[SYM] = price
+        realized = float(self.position) * (price - self.entry_price)
+        self.position = Decimal("0")
+        del self.stops[cid]
+        self.triggered[cid] = self._fill(qty, realized)
+
+    def stop_fill(self, symbol, cid):
+        return self.triggered.get(cid)
+
+    def funding_since(self, symbol, since_ms):
+        return -0.01
+
+
+def _signal(side, bar_open, atr=0.06, ch_long=1.30, ch_short=1.70):
+    return LiveSignal(SYM, bar_open, close=1.5, signal=side, atr=atr, chandelier_long=ch_long, chandelier_short=ch_short)
+
+
+def _engine(tmp_path, ex, sig_holder, dry_run=False, config=CONFIG):
+    return LiveEngine(config, ex, lambda s: sig_holder["sig"], FILTERS, StateStore("testnet", root=tmp_path),
+                      dry_run=dry_run)
+
+
+def test_last_closed_bar_open():
+    assert last_closed_bar_open(T0) == pd.Timestamp("2026-09-24 00:00", tz="UTC")
+    assert last_closed_bar_open(pd.Timestamp("2026-09-24 11:59", tz="UTC")) == pd.Timestamp("2026-09-23 12:00", tz="UTC")
+
+
+def test_entry_places_stop_and_persists(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    state = _engine(tmp_path, ex, sig).cycle(T0)
+    pos = state.positions[SYM]
+    # 2000 * 0.3% / (2*0.06/1.5 = 8%) = 75 USDT -> 50 XRP; stop 1.50 - 0.12
+    assert pos.qty == "50.0" and pos.stop_price == "1.3800"
+    assert ex.position == Decimal("50.0") and len(ex.stops) == 1
+    reloaded = StateStore("testnet", root=tmp_path).load(CONFIG)
+    assert reloaded.positions[SYM].stop_client_order_id in ex.stops
+    assert reloaded.last_processed_bar == last_closed_bar_open(T0).isoformat()
+
+
+def test_same_candle_is_not_processed_twice(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    n_calls = len(ex.calls)
+    eng.cycle(T0 + pd.Timedelta(minutes=5))
+    assert len(ex.calls) == n_calls
+
+
+def test_stale_candle_is_retried_not_marked(tmp_path):
+    ex = FakeExchange()
+    sig = {"sig": _signal(1, last_closed_bar_open(T0) - pd.Timedelta("12h"))}   # Binance not updated yet
+    state = _engine(tmp_path, ex, sig).cycle(T0)
+    assert state.positions == {} and state.last_processed_bar is None
+
+
+def test_trailing_places_new_stop_before_cancelling_old(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    old = next(iter(ex.stops))
+    ex.prices[SYM] = 1.60
+    t1 = T0 + pd.Timedelta("12h")
+    sig["sig"] = _signal(1, last_closed_bar_open(t1), ch_long=1.45)
+    state = eng.cycle(t1)
+    assert state.positions[SYM].stop_price == "1.4500"
+    assert list(ex.stops) == [state.positions[SYM].stop_client_order_id]
+    assert ex.calls.index("stop 1.4500") < ex.calls.index(f"cancel {old}")
+
+
+def test_trailing_never_loosens(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    t1 = T0 + pd.Timedelta("12h")
+    sig["sig"] = _signal(1, last_closed_bar_open(t1), ch_long=1.20)    # lower than 1.38
+    assert eng.cycle(t1).positions[SYM].stop_price == "1.3800"
+
+
+def test_signal_flip_closes_then_reverses(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    ex.prices[SYM] = 1.56
+    t1 = T0 + pd.Timedelta("12h")
+    sig["sig"] = _signal(-1, last_closed_bar_open(t1))
+    state = eng.cycle(t1)
+    assert state.positions[SYM].side == -1 and ex.position < 0
+    trade = eng.store.read_jsonl(eng.store.trades_path)[0]
+    assert trade["reason"] == "signal" and trade["side"] == "LONG"
+    assert trade["net_pnl"] == pytest.approx(50 * 0.06 - trade["commission"] - 0.01)
+    assert state.realized_pnl == pytest.approx(trade["net_pnl"])
+
+
+def test_stop_filled_while_away_is_recorded_and_reentry_follows(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    ex.trigger_stop(1.38)
+    state = eng.cycle(T0 + pd.Timedelta(minutes=5))      # same candle: only reconcile runs
+    assert SYM not in state.positions
+    assert eng.store.read_jsonl(eng.store.trades_path)[0]["reason"] == "stop"
+    assert state.realized_pnl < 0
+    t1 = T0 + pd.Timedelta("12h")
+    sig["sig"] = _signal(1, last_closed_bar_open(t1))    # signal still LONG -> re-enter, like the backtest
+    assert SYM in eng.cycle(t1).positions
+
+
+def test_failed_stop_closes_position_and_pauses_symbol(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    ex.fail_stop = True
+    state = _engine(tmp_path, ex, sig).cycle(T0)
+    assert ex.position == 0 and SYM not in state.positions and SYM in state.paused
+
+
+def test_dry_run_sends_nothing_and_saves_nothing(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    dry = DryRunExchange(ex)
+    _engine(tmp_path, dry, sig, dry_run=True).cycle(T0)
+    assert ex.calls == [] and ex.position == 0
+    assert any("STOP_MARKET" in w for w in dry.writes)
+    assert not (tmp_path / "testnet" / "state.json").exists()
+
+
+def test_kill_switch_blocks_entries(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    store = StateStore("testnet", root=tmp_path)
+    state = store.load(CONFIG)
+    state.kill_switch.update(2_000)
+    state.kill_switch.update(1_300)
+    store.save(state)
+    assert _engine(tmp_path, ex, sig).cycle(T0).positions == {}
+
+
+def test_commands_pause_close_and_reset(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    q = cmdq.CommandQueue(eng.store.dir)
+    q.submit(cmdq.PAUSE_BOT)
+    q.submit(cmdq.CLOSE_POSITION, SYM)
+    state = eng.cycle(T0 + pd.Timedelta(minutes=5))
+    assert state.bot_paused and SYM not in state.positions and ex.position == 0 and ex.stops == {}
+    assert [r["ok"] for r in q.history()] == [True, True]
+    # Paused bot: a new candle with a LONG signal does not re-enter.
+    t1 = T0 + pd.Timedelta("12h")
+    sig["sig"] = _signal(1, last_closed_bar_open(t1))
+    assert eng.cycle(t1).positions == {}
+    q.submit(cmdq.RESUME_BOT)
+    q.submit(cmdq.RESET_KILL_SWITCH)
+    state = eng.cycle(t1 + pd.Timedelta(minutes=5))
+    assert not state.bot_paused and not state.kill_switch.tripped
+
+
+def test_unknown_position_pauses_symbol_and_is_left_alone(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    ex.position, ex.entry_price = Decimal("-10"), 1.5      # e.g. a manual trade by the user
+    state = _engine(tmp_path, ex, sig).cycle(T0)
+    assert SYM in state.paused and ex.position == Decimal("-10") and ex.calls == []

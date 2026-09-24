@@ -27,11 +27,13 @@ class SymbolFilters:
         """Largest multiple of step_size <= qty. The 12-decimal pre-round absorbs float
         noise (75 / 1.5 computed as 49.99999999999999 must give 50.0, not 49.9)."""
         clean = Decimal(str(round(qty, 12)))
-        return (clean / self.step_size).to_integral_value(rounding=ROUND_DOWN) * self.step_size
+        steps = (clean / self.step_size).to_integral_value(rounding=ROUND_DOWN)
+        return (steps * self.step_size).quantize(self.step_size)
 
     def round_price(self, price: float) -> Decimal:
         """Nearest multiple of tick_size."""
-        return (Decimal(str(price)) / self.tick_size).to_integral_value(rounding=ROUND_HALF_UP) * self.tick_size
+        ticks = (Decimal(str(price)) / self.tick_size).to_integral_value(rounding=ROUND_HALF_UP)
+        return (ticks * self.tick_size).quantize(self.tick_size)
 
     def min_order_usdt(self, price: float) -> float:
         """Smallest order that satisfies both min_qty and min_notional at `price`."""

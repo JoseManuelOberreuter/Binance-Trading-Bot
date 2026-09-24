@@ -17,6 +17,10 @@ from xrp_futures.execution.state import BotState
 
 BOT_PREFIX = "xfb_"
 STOP_ORDER_TYPES = {"STOP_MARKET", "STOP"}
+# Since 2025-12-09 Binance routes conditional orders (STOP_MARKET...) to the algo
+# order service: they're listed by futures_get_open_algo_orders() — NOT by
+# futures_get_open_orders() — and identified by clientAlgoId (verified on testnet
+# with scripts/probe_testnet_stop.py).
 
 # Action kinds
 PLACE_STOP = "PLACE_STOP"                  # bot position has no protective stop on the exchange
@@ -32,6 +36,7 @@ class ExchangePosition:
     symbol: str
     amt: Decimal                  # signed: >0 long, <0 short
     entry_price: float
+    unrealized_pnl: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -60,13 +65,14 @@ def parse_positions(raw: list[dict]) -> dict[str, ExchangePosition]:
     for p in raw:
         amt = Decimal(p["positionAmt"])
         if amt != 0:
-            out[p["symbol"]] = ExchangePosition(p["symbol"], amt, float(p["entryPrice"]))
+            out[p["symbol"]] = ExchangePosition(p["symbol"], amt, float(p["entryPrice"]),
+                                                float(p.get("unRealizedProfit") or 0))
     return out
 
 
-def parse_orders(raw: list[dict]) -> list[ExchangeOrder]:
-    """futures_get_open_orders() rows -> ExchangeOrder list."""
-    return [ExchangeOrder(o["symbol"], o.get("clientOrderId", ""), o["type"], float(o.get("stopPrice") or 0))
+def parse_algo_orders(raw: list[dict]) -> list[ExchangeOrder]:
+    """futures_get_open_algo_orders() rows (where stops live) -> ExchangeOrder list."""
+    return [ExchangeOrder(o["symbol"], o.get("clientAlgoId", ""), o["orderType"], float(o.get("triggerPrice") or 0))
             for o in raw]
 
 
