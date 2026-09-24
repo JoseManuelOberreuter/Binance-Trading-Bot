@@ -118,15 +118,21 @@ class BinanceFuturesExchange:
 
     # ---- writes ------------------------------------------------------------------
     def setup_symbol(self, symbol: str, leverage: int) -> None:
-        """Isolated margin + leverage. 'No need to change' (-4046) is fine; other errors are logged
-        (e.g. margin type can't change while a position is open) rather than aborting startup."""
-        for call, kwargs in ((self.client.futures_change_margin_type, dict(symbol=symbol, marginType="ISOLATED")),
-                             (self.client.futures_change_leverage, dict(symbol=symbol, leverage=leverage))):
+        """Isolated margin + leverage, changing only what differs (Binance rejects margin-type
+        changes while the symbol has open orders, even when it's already isolated)."""
+        current = self.client.futures_symbol_config(symbol=symbol)[0]
+        changes = []
+        if current["marginType"] != "ISOLATED":
+            changes.append((self.client.futures_change_margin_type, dict(symbol=symbol, marginType="ISOLATED")))
+        if int(current["leverage"]) != leverage:
+            changes.append((self.client.futures_change_leverage, dict(symbol=symbol, leverage=leverage)))
+        for call, kwargs in changes:
             try:
                 call(**kwargs)
+                log.info("%s: %s %s", symbol, call.__name__, kwargs)
             except BinanceAPIException as e:
-                if e.code != -4046:
-                    log.warning("%s: %s failed: %s (%s)", symbol, call.__name__, e.message, e.code)
+                log.warning("%s: %s failed: %s (%s) — current: %s %sx", symbol, call.__name__, e.message, e.code,
+                            current["marginType"], current["leverage"])
 
     def market_order(self, symbol: str, side: int, qty: Decimal, reduce_only: bool) -> Fill:
         params = dict(symbol=symbol, side="BUY" if side == 1 else "SELL", type="MARKET", quantity=str(qty),
