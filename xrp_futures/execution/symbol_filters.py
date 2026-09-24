@@ -24,8 +24,10 @@ class SymbolFilters:
     min_notional: Decimal    # MIN_NOTIONAL.notional (USDT)
 
     def round_qty(self, qty: float) -> Decimal:
-        """Largest multiple of step_size <= qty."""
-        return (Decimal(str(qty)) / self.step_size).to_integral_value(rounding=ROUND_DOWN) * self.step_size
+        """Largest multiple of step_size <= qty. The 12-decimal pre-round absorbs float
+        noise (75 / 1.5 computed as 49.99999999999999 must give 50.0, not 49.9)."""
+        clean = Decimal(str(round(qty, 12)))
+        return (clean / self.step_size).to_integral_value(rounding=ROUND_DOWN) * self.step_size
 
     def round_price(self, price: float) -> Decimal:
         """Nearest multiple of tick_size."""

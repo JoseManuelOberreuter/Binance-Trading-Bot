@@ -162,7 +162,7 @@ xrp_futures/tests/
 | 0 | ✅ Hecha: fee 0.05%, equity mark-to-market en el motor, referencia del portafolio de 8 (ver Contexto) | — |
 | 1 | ✅ Hecha: `client` + `symbol_filters` + `check_futures_connectivity` (testnet: 5.000 USDT, one-way, 8 símbolos OK) | — |
 | 2 | ✅ Hecha: `live_signal` + test de regresión (>1.000 puntos sintéticos) + `show_live_signals --compare-cache` (datos reales: 100% igual en las 8) | — |
-| 3 | `sizing`, `kill_switch`, `state`, `reconcile` + tests (lógica pura) | Tests pasando |
+| 3 | ✅ Hecha: `sizing`, `kill_switch`, `state`, `reconcile` + 33 tests (lógica pura) | — |
 | 4 | `order_manager` + `engine` + `run_live_bot` en **testnet** | Un ciclo de 12h supervisado: entradas, stops y reemplazos correctos |
 | 5 | Dashboard Streamlit | Muestra equity, posiciones y operaciones desde los archivos reales |
 | 6 | Testnet desatendido, **1-2 meses**, en PC siempre encendido o VPS | Sin errores de estado; operaciones coinciden con un backtest de la misma ventana |

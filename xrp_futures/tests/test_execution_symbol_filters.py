@@ -54,3 +54,9 @@ def test_qty_for_notional_checks_min_notional_after_rounding():
 def test_filters_for_raises_on_unknown_symbol():
     with pytest.raises(KeyError):
         filters_for({"symbols": [_info()]}, ["XRPUSDT", "DOESNOTEXIST"])
+
+
+def test_round_qty_absorbs_float_noise_from_division():
+    f = parse_symbol_filters(_info(step="0.1"))
+    assert f.round_qty(49.99999999999999) == Decimal("50.0")
+    assert f.round_qty(49.95) == Decimal("49.9")     # real fractions still round down
