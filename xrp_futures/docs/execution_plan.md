@@ -216,7 +216,7 @@ xrp_futures/tests/
 | 2 | ✅ Hecha: `live_signal` + test de regresión (>1.000 puntos sintéticos) + `show_live_signals --compare-cache` (datos reales: 100% igual en las 8) | — |
 | 3 | ✅ Hecha: `sizing`, `kill_switch`, `state`, `reconcile` + 33 tests (lógica pura) | — |
 | 4 | `order_manager` + `engine` + `run_live_bot` en **testnet** | Un ciclo de 12h supervisado: entradas, stops y reemplazos correctos |
-| 5 | Dashboard Streamlit | Muestra equity, posiciones y operaciones desde los archivos reales |
+| 5 | ✅ Hecha: dashboard Streamlit con 4 controles vía buzón de comandos (`streamlit run xrp_futures/monitor/dashboard.py`) | — |
 | 6 | Testnet desatendido, **1-2 meses**, en PC siempre encendido o VPS | Sin errores de estado; operaciones coinciden con un backtest de la misma ventana |
 | 7 | **Real con capital chico**, 3-6 meses (monto a decidir: ~$2.000 para operar las 8; con menos se omiten monedas — ver decisión 15) | Slippage/comisiones reales cercanos al modelo; resultado dentro de lo esperable |
 | 8 | Decisión de escalar capital | Decisión manual, con los datos de la Fase 7 |
