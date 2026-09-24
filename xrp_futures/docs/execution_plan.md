@@ -22,9 +22,10 @@ margen. Ver `project_status.md` para la evidencia detrás de cada decisión.
   SOLUSDT, ADAUSDT, LTCUSDT, LINKUSDT. Elegido por regla (grandes, líquidas,
   con Futures desde ~2020), no por resultado de backtest.
 - **Referencia de backtest (Fase 0, hecha)** — 8 monedas, 0.3%/operación,
-  fee 0.05%, equity mark-to-market: $1.000 (ene-2020) → $2.305 (sep-2026),
-  ~13% anual compuesto, peor caída -21%. Por año: 2020 +23%, 2021 +50%,
-  2022 -4%, 2023 +15%, 2024 -2%, 2025 +3%, 2026 (parcial) +12%.
+  fee 0.05%, equity mark-to-market, stop inicial con el ATR de la última vela
+  cerrada (igual que el bot): $1.000 (ene-2020) → $2.376 (sep-2026), ~14%
+  anual compuesto, peor caída -20.8%. Por año: 2020 +23.0%, 2021 +51.9%,
+  2022 -5.1%, 2023 +16.4%, 2024 -0.2%, 2025 +3.1%, 2026 (parcial) +11.9%.
   `python -m xrp_futures.scripts.run_multi_asset_portfolio`.
 - **Por qué 0.3% y no más**: el riesgo es *por posición* y con 8 monedas
   pueden estar las 8 abiertas y detenerse juntas en un crash. Medido:
@@ -98,6 +99,36 @@ margen. Ver `project_status.md` para la evidencia detrás de cada decisión.
     para operar cada moneda ~90% del tiempo: XRP/BNB/SOL/ADA ~$200-220, ETH
     ~$710, LTC ~$850, LINK ~$900, BTC ~$1.950 → **~$2.000 para las 8**.
     Con menos capital el bot omite (y registra) las órdenes bajo el mínimo.
+
+16. **Señal con datos del mercado real** (confirmado): velas de producción
+    (públicas, sin claves) aun operando en testnet; los stops se disparan con
+    los precios de la testnet.
+17. **Capital simulado dinámico** (confirmado): en testnet el equity para
+    dimensionar = $250 + PnL realizado del bot desde que arrancó (no fijo).
+18. **Posiciones ajenas: no tocar y avisar** (confirmado): toda orden del bot
+    lleva `newClientOrderId` con prefijo `xfb_`; el bot nunca modifica ni
+    cancela órdenes sin ese prefijo. Una posición que el bot no abrió deja esa
+    moneda en pausa + alerta; no se cierra.
+
+## Fase 3 — diseño (lógica pura, sin red)
+
+- `sizing.py` — `plan_entry(...)` → `EntryPlan(qty, notional, stop_price)` o
+  `Skip(reason)`: notional = equity × risk_pct / (2×ATR_última_vela / precio);
+  redondeo con los filtros; `Skip` si queda bajo el mínimo, si superaría el
+  tope de exposición, o si el kill-switch está activo. Stop inicial = precio
+  ∓ 2×ATR, redondeado al tick.
+- `kill_switch.py` — `KillSwitch.update(equity)`: registra el máximo; al caer
+  30% desde él queda **bloqueado** (latch) hasta un reset manual explícito.
+- `state.py` — `BotState` (posiciones con qty/entrada/stop/id de orden de
+  stop, última vela procesada, máximo de equity, kill-switch, PnL realizado)
+  en `live_state/<entorno>/state.json` (gitignored), escritura atómica
+  (archivo temporal + rename); `trades.jsonl` y `equity_log.jsonl` append-only.
+- `reconcile.py` — `reconcile(state, posiciones_exchange, ordenes_exchange)` →
+  lista de acciones, sin ejecutarlas: `PLACE_STOP` (posición sin stop),
+  `RECORD_CLOSED` (el stop saltó con el bot apagado), `CANCEL_ORPHAN_STOP`
+  (stop `xfb_` sin posición), `CANCEL_DUPLICATE_STOP`, `PAUSE_SYMBOL` +
+  alerta (posición ajena o cantidad distinta). Ignora órdenes sin `xfb_`.
+- Tests por módulo, incluida una tabla de escenarios de reconciliación.
 
 ## Archivos
 

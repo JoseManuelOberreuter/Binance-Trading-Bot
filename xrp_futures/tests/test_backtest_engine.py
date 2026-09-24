@@ -156,3 +156,16 @@ def test_mark_to_market_curve_includes_open_position_pnl():
     # Flat bars: both curves agree.
     assert result.mtm_equity_curve.iloc[0] == pytest.approx(result.equity_curve.iloc[0])
     assert result.mtm_equity_curve.iloc[-1] == pytest.approx(result.equity_curve.iloc[-1])
+
+
+def test_initial_stop_uses_last_closed_bar_atr_not_entry_bar():
+    # Signal at bar0 (ATR 2) -> entry at bar1's open. Bar1's own ATR (10) is not known
+    # at its open, so the initial stop must come from bar0's ATR.
+    bars = _bars([(100, 101, 99, 100, 1), (100, 101, 99, 100, 1), (100, 101, 99, 100, 0)])
+    bars.loc[1, "atr"] = 10.0
+    config = BacktestConfig(
+        initial_equity=10_000.0, risk_pct=0.01, use_vol_targeting=False, stop_type="atr", atr_multiplier=1.0,
+        trailing_enabled=False, cost_model=CostModel(taker_fee_pct=0.0, slippage_pct=0.0, funding_enabled=False),
+    )
+    result = run_backtest(bars, _empty_funding(), config)
+    assert result.trades[0].entry_stop_distance_pct == pytest.approx(2.0 / 100.0)

@@ -199,10 +199,14 @@ def run_backtest(
         if pending_target is not None and pending_target != 0 and pos is None and equity > 0 and entry_allowed:
             side = pending_target
             fill = cost.slippage_adjusted_price(bar["open"], side, is_entry=True)
-            stop = _initial_stop(fill, side, bar, config)
+            # Size/stop from the last CLOSED bar (i-1): bar i's own ATR/vol include its
+            # high/low/close, which aren't known at its open (was a mild lookahead).
+            # pending_target is only set from bar i-1, so i >= 1 here.
+            decision_bar = bars.iloc[i - 1]
+            stop = _initial_stop(fill, side, decision_bar, config)
             sdp = stp.stop_distance_pct(fill, stop)
             if config.use_vol_targeting:
-                realized_vol = bar.get("realized_vol_ann")
+                realized_vol = decision_bar.get("realized_vol_ann")
                 if realized_vol is None or not np.isfinite(realized_vol) or realized_vol <= 0:
                     realized_vol = config.target_vol  # neutral scalar (1.0) during vol warmup
                 notional = ps.combined_notional(

@@ -42,7 +42,7 @@ YEARS = [2020, 2021, 2022, 2023, 2024, 2025, 2026]
 ORIGINAL_OOS_YEARS = [2023, 2024, 2025, 2026]  # the 4 SPEC_WINDOWS test years
 # Sleeve risk_pct values. Per-trade risk on TOTAL capital ~= sleeve_risk / N,
 # so sleeve_risk = N * 1% (8% for 8 assets) matches the XRP-only baseline's 1%/trade.
-SLEEVE_RISKS = [0.08, 0.16]  # = 1% and 2% per trade on total capital with 8 sleeves
+SLEEVE_RISKS = [0.024]  # 8 sleeves x 0.3% = the user-confirmed 0.3% per trade on total capital
 START_CAPITAL = 1_000.0
 
 FROZEN_PARAMS = strat_a.StrategyAParams(timeframe=TIMEFRAME, method="donchian", donchian_window=40)
@@ -167,7 +167,7 @@ def main() -> None:
 def dollar_table(sleeves, total_risk: float) -> Table:
     """Year-by-year USD path from START_CAPITAL (actual, not annualized, returns),
     with each asset's contribution and the in-year mark-to-market max drawdown."""
-    dt = Table(title=f"USD path from ${START_CAPITAL:,.0f}, {total_risk*100:.0f}% risk/trade on total (mark-to-market)")
+    dt = Table(title=f"USD path from ${START_CAPITAL:,.0f}, {total_risk*100:.1f}% risk/trade on total (mark-to-market)")
     for col in ["Year", "Start", "End", "Gain", "Return", *[s.replace("USDT", "") for s in UNIVERSE],
                 "Trades", "Win %", "Max DD"]:
         dt.add_column(col, justify="right")
