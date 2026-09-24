@@ -130,6 +130,50 @@ margen. Ver `project_status.md` para la evidencia detrás de cada decisión.
   alerta (posición ajena o cantidad distinta). Ignora órdenes sin `xfb_`.
 - Tests por módulo, incluida una tabla de escenarios de reconciliación.
 
+## Fase 4 — diseño (primeras órdenes, solo testnet)
+
+**Hallazgo que cambia el diseño:** desde 2025-12-09 Binance USDⓈ-M enruta las
+órdenes condicionales (`STOP_MARKET`, etc.) al servicio de *algo orders*: se
+crean con `clientAlgoId` (no `newClientOrderId`), se listan con
+`futures_get_open_algo_orders()` (NO aparecen en `futures_get_open_orders()`)
+y se cancelan con `futures_cancel_algo_order()`. `reconcile` y
+`check_futures_connectivity` deben leer los stops desde ahí.
+
+Decisiones confirmadas:
+19. **Trigger del stop = último precio** (`workingType=CONTRACT_PRICE`), igual
+    que el backtest (máximos/mínimos de vela). `priceProtect` desactivado
+    (podría impedir que el stop se dispare en un crash).
+20. **Prueba inicial autorizada** (testnet): abrir ~$6 de XRP, poner un stop
+    algo, verificar que aparece en `openAlgoOrders`, cancelarlo y cerrar —
+    confirma el formato real de las respuestas antes de construir el motor.
+21. **Arranque:** 1 ciclo `--dry-run` revisado juntos, luego testnet real.
+22. **Alertas:** consola + `live_state/<entorno>/bot.log` (Telegram después).
+
+Módulos:
+- `order_manager.py` — `setup_symbol` (margen aislado + 3x; tolera "no need
+  to change"), `open_market` (MARKET, `newClientOrderId` `xfb_e_…`, lee
+  precio/cantidad ejecutados reales), `place_stop` (algo `STOP_MARKET`,
+  `reduceOnly`, `quantity` exacta, `clientAlgoId` `xfb_s_…`), `replace_stop`
+  (**crea el nuevo antes de cancelar el viejo** — nunca sin protección),
+  `close_market` (MARKET `reduceOnly`), `cancel_stop`.
+- `engine.py` — ciclo cada ~5 min: (1) snapshot de Binance → `reconcile` →
+  ejecutar acciones (`RECORD_CLOSED` calcula el PnL real con
+  `futures_account_trades` + funding de `futures_income_history`); (2) si
+  cerró una vela de 12h nueva, por símbolo no pausado, con las reglas del
+  backtest: salida si la señal cambió (cerrar + cancelar stop), trailing del
+  Chandelier si sigue (solo a favor → `replace_stop`), entrada si está plano
+  y la señal ≠ 0 (incluye re-entrada tras un stop, como el backtest); salidas
+  antes que entradas; (3) equity simulado, kill-switch, logs, `state.save()`.
+- `scripts/run_live_bot.py` — `--dry-run` (decide y muestra, no envía),
+  `--once` (un ciclo). Producción exige `FUTURES_ENVIRONMENT=production`
+  **y** un flag explícito.
+- Tests con un Binance falso en memoria: entrada + stop, trailing, cambio de
+  dirección, stop ejecutado con el bot apagado, kill-switch, dry-run sin
+  órdenes.
+
+Diferencia conocida con el backtest: el backtest entra al precio de apertura
+de la vela; el bot entra hasta ~5 min después (polling) a precio de mercado.
+
 ## Archivos
 
 ```
