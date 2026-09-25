@@ -1,0 +1,3 @@
+# Deploy files run on Linux: always LF, even when checked out/archived on Windows.
+deploy/* text eol=lf
+*.sh text eol=lf

@@ -1,0 +1,15 @@
+[Unit]
+Description=xrp_futures live bot (Binance USDT-M Futures, cycle every 5 min)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/xfb
+ExecStart=/opt/xfb/.venv/bin/python -m xrp_futures.scripts.run_live_bot
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

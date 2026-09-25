@@ -248,6 +248,36 @@ Tests: el motor emite los eventos esperados (Binance falso); cada evento se
 traduce al mensaje esperado; los `ENTRY_SKIPPED` no se repiten dentro de una
 misma vela.
 
+## Infraestructura 24/7 — Oracle Cloud (decisión del usuario)
+
+Para que el bot y el panel funcionen sin el PC encendido. Se evaluó Vercel +
+Supabase y se descartó: Streamlit no corre en Vercel (serverless, sin
+conexiones persistentes), el cron cada 5 min exige plan Pro, las funciones
+salen por IPs de EE.UU. (Binance Futures responde 451) y no hay IP fija para
+restringir la API key. Elegido: **VM Oracle Cloud Always Free** (Ubuntu 24.04,
+Ampere A1, 1 OCPU / 6 GB), creada por el usuario.
+
+29. **Acceso privado con Tailscale** (gratis): el panel escucha solo en
+    `127.0.0.1:8501`; `tailscale serve` lo publica únicamente dentro de la red
+    privada del usuario (PC y celular con la app). Ningún puerto abierto a
+    internet salvo SSH.
+30. **Zona horaria del servidor: America/Santiago** (horas del panel).
+31. **En el servidor solo van las claves de Futures testnet** mientras dure la
+    Fase 6; las de producción se agregan al pasar a la Fase 7, con la API key
+    restringida a la IP fija de la VM.
+
+Archivos en `deploy/`: `xfb-bot.service` y `xfb-dashboard.service` (systemd,
+reinicio automático), `setup_server.sh` (instalación única en la VM),
+`deploy.sh` (desde el PC: sube el código commiteado con `git archive`, nunca
+`.env` ni `live_state/`, y reinicia los servicios).
+
+Secuencia: (1) crear VM y probar que `fapi.binance.com` no responda 451 desde
+ahí; (2) `deploy.sh` + `setup_server.sh`; (3) copiar `.env` (solo claves
+testnet) y **detener el bot del PC y copiar `live_state/testnet`** para que el
+servidor reconozca las posiciones abiertas; (4) arrancar servicios y
+verificar un ciclo sin alertas; (5) `tailscale up` + `tailscale serve`.
+Actualizaciones posteriores: commit en el PC y `deploy/deploy.sh <ip> <llave>`.
+
 ## Archivos
 
 ```
