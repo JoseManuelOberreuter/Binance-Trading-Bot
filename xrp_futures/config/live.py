@@ -39,6 +39,7 @@ class LiveConfig:
     # like real money would. Ignored in production (already the real filters).
     use_production_filters: bool = True
     bars_lookback: int = 300                     # 12h bars fetched per cycle (Donchian 40 + ATR warmup)
+    status_every_min: int = 30                   # "still running" summary in the dashboard console (user-chosen)
 
     def backtest_config(self, initial_equity: float = 10_000.0) -> BacktestConfig:
         """The BacktestConfig equivalent to this live config (for live-vs-backtest checks)."""

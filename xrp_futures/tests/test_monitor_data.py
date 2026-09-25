@@ -51,3 +51,51 @@ def test_trade_summary_ignores_unknown_pnl():
     s = data.trade_summary(trades)
     assert s["n"] == 3 and s["wins"] == 2 and s["net_pnl"] == pytest.approx(2.5)
     assert data.trade_summary(pd.DataFrame())["n"] == 0
+
+
+def test_equity_every_keeps_last_point_per_bucket():
+    times = pd.date_range("2026-09-24 00:00", periods=12 * 24, freq="5min", tz="UTC")   # 24 h of 5-min cycles
+    eq = pd.DataFrame({"time": times, "equity": range(len(times))})
+    four_h = data.equity_every(eq, "4h")
+    assert list(four_h["time"].dt.strftime("%H:%M")) == ["00:00", "03:55", "07:55", "11:55", "15:55", "19:55", "23:55"]
+    assert four_h["equity"].iloc[-1] == eq["equity"].iloc[-1]          # newest point = current equity
+    assert len(data.equity_every(eq, "1D")) == 2                         # start + end of the day
+    # Only 35 min of history (the live case right after launch): start + now -> a drawable line.
+    assert len(data.equity_every(eq.iloc[:8], "4h")) == 2
+    assert len(data.equity_every(eq.iloc[:1], "4h")) == 1               # a single snapshot isn't duplicated
+    assert data.equity_every(eq.iloc[:0], "4h").empty
+
+
+def test_time_axis_aligns_to_interval():
+    first, last = pd.Timestamp("2026-09-24 18:50"), pd.Timestamp("2026-09-24 19:30")
+    start, end, ticks = data.time_axis(first, last, "4h")
+    assert (start, end) == (pd.Timestamp("2026-09-24 16:00"), pd.Timestamp("2026-09-25 16:00"))
+    assert [t.strftime("%H:%M") for t in ticks] == ["16:00", "20:00", "00:00", "04:00", "08:00", "12:00", "16:00"]
+    start, end, ticks = data.time_axis(first, last, "1D")
+    assert start == pd.Timestamp("2026-09-24") and end == pd.Timestamp("2026-10-01")
+    assert all(t.hour == 0 for t in ticks) and len(ticks) == 8
+    # A long history is thinned to at most 12 ticks, still on day boundaries.
+    _, _, ticks = data.time_axis(first, first + pd.Timedelta(days=60), "1D")
+    assert len(ticks) <= data.MAX_TICKS and all(t.hour == 0 for t in ticks)
+
+
+def test_latest_marks(tmp_path):
+    store = StateStore("testnet", root=tmp_path)
+    store.save(BotState.new("testnet", CONFIG))
+    store.append_equity({"time": "2026-09-24T21:50:00+00:00", "equity": 250.0})     # older row, no marks
+    assert data.latest_marks(data.load("testnet", CONFIG, root=tmp_path)) == {}
+    store.append_equity({"time": "2026-09-24T21:55:00+00:00", "equity": 249.9,
+                         "positions": {"XRPUSDT": {"price": 1.53, "unrealized": -0.05}}})
+    assert data.latest_marks(data.load("testnet", CONFIG, root=tmp_path))["XRPUSDT"]["price"] == 1.53
+
+
+def test_per_coin_cumulative_result():
+    state = BotState.new("testnet", CONFIG)                     # simulated capital 250
+    state.positions["XRPUSDT"] = Position("XRPUSDT", 1, "5.5", 1.5, "2026-09-24T18:50:00+00:00", "1.4")
+    trades = pd.DataFrame({"symbol": ["XRPUSDT", "BNBUSDT", "BNBUSDT"], "net_pnl": [1.0, 0.5, -0.25]})
+    marks = {"XRPUSDT": {"price": 1.49, "unrealized": -0.05}}
+    r = data.per_coin(state, trades, marks, ["XRPUSDT", "BNBUSDT", "BTCUSDT"])
+    assert r["XRPUSDT"]["total"] == pytest.approx(0.95) and r["XRPUSDT"]["pct"] == pytest.approx(0.95 / 250)
+    assert r["BNBUSDT"]["total"] == pytest.approx(0.25) and r["BNBUSDT"]["n_trades"] == 2
+    assert r["BTCUSDT"]["traded"] is False and r["BTCUSDT"]["pct"] is None
+    assert data.per_coin(state, pd.DataFrame(), {}, ["BTCUSDT"])["BTCUSDT"]["total"] == 0.0

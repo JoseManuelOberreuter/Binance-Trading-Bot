@@ -103,3 +103,13 @@ def test_standby_line():
     state.bot_paused = True
     assert m.standby_line(state, 0.0, None, True, now, TZ).startswith("En pausa")
     assert m.standby_line(state, 0.0, None, False, now, TZ).startswith("El bot no responde")
+
+
+def test_status_summary():
+    msg = _render(ev.STATUS, equity=249.77, realized_pnl=0.0, unrealized_pnl=-0.23, open_positions=4,
+                  market_up=7, market_down=1, market_total=8, bot_paused=False, kill_switch=False)
+    assert msg.plain() == ("Sigo activo. Mercado: 7 de 8 al alza. 4 posiciones abiertas, no realizado −0.23. "
+                           "Capital 249.77.")
+    quiet = _render(ev.STATUS, equity=250, unrealized_pnl=0, open_positions=0, market_total=0,
+                    bot_paused=True, kill_switch=False)
+    assert quiet.plain() == "Sigo activo, en pausa: no abro operaciones nuevas. Sin posiciones abiertas. Capital 250.00."

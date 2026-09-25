@@ -108,3 +108,64 @@ def positions_frame(state: BotState | None) -> pd.DataFrame:
                          Entrada=entry, Stop=stop, **{"Distancia stop": abs(entry - stop) / entry},
                          Desde=pd.Timestamp(p.entry_time).strftime("%Y-%m-%d %H:%M UTC")))
     return pd.DataFrame(rows)
+
+
+def equity_every(equity: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """
+    The very first snapshot (the curve's starting point) plus one point per `rule` bucket
+    (e.g. "4h", "1D"): the LAST snapshot in each bucket, with its real timestamp — so the
+    newest point is always the current equity and the curve is visible from the start,
+    not only once a second bucket has closed.
+    """
+    if equity.empty:
+        return equity
+    df = equity.sort_values("time").reset_index(drop=True)
+    last_per_bucket = df.groupby(df["time"].dt.floor(rule), sort=True).tail(1)
+    return pd.concat([df.iloc[[0]], last_per_bucket]).drop_duplicates().reset_index(drop=True)
+
+
+MIN_BUCKETS = {"4h": 6, "1D": 7}   # show at least 1 day of 4h buckets / 1 week of days
+MAX_TICKS = 12
+
+
+def time_axis(first: pd.Timestamp, last: pd.Timestamp, rule: str) -> tuple[pd.Timestamp, pd.Timestamp, list]:
+    """
+    (start, end, ticks) for the equity chart's x axis, aligned to the chosen interval:
+    the window starts at the bucket boundary before `first`, spans at least MIN_BUCKETS,
+    and ticks fall on bucket boundaries (thinned to <= MAX_TICKS) — never 5-minute ticks
+    when the user asked for 4-hour or daily points.
+    """
+    step = pd.Timedelta(rule)
+    start = first.floor(rule)
+    end = max(last.ceil(rule), start + MIN_BUCKETS.get(rule, 1) * step)
+    ticks = list(pd.date_range(start, end, freq=rule))
+    stride = -(-len(ticks) // MAX_TICKS)   # ceil division
+    return start, end, ticks[::stride]
+
+
+def latest_marks(view: BotView) -> dict[str, dict]:
+    """{symbol: {"price", "unrealized"}} from the newest equity snapshot that has them."""
+    if view.equity.empty or "positions" not in view.equity:
+        return {}
+    marks = view.equity["positions"].dropna()
+    return marks.iloc[-1] if len(marks) and isinstance(marks.iloc[-1], dict) else {}
+
+
+def per_coin(state: BotState, trades: pd.DataFrame, marks: dict[str, dict], universe) -> dict[str, dict]:
+    """
+    Cumulative result per coin since the bot started: realized (closed trades, net of fees
+    and funding) + unrealized (open position, from the last bot cycle). `pct` is relative
+    to the starting capital — how much each coin has added to or taken from the account.
+    """
+    capital0 = state.simulated_capital or 0.0
+    out = {}
+    for symbol in universe:
+        mine = trades[trades["symbol"] == symbol] if not trades.empty and "symbol" in trades else trades.iloc[:0]
+        realized = float(mine["net_pnl"].dropna().sum()) if "net_pnl" in mine else 0.0
+        mark = marks.get(symbol) if symbol in state.positions else None
+        unrealized = float(mark["unrealized"]) if mark else 0.0
+        total = realized + unrealized
+        traded = len(mine) > 0 or symbol in state.positions
+        out[symbol] = dict(realized=realized, unrealized=unrealized, total=total, traded=traded,
+                           n_trades=len(mine), pct=(total / capital0) if capital0 and traded else None)
+    return out

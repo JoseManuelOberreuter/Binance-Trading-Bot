@@ -22,6 +22,7 @@ COMMAND_APPLIED = "COMMAND_APPLIED"
 ALERT = "ALERT"
 KILL_SWITCH = "KILL_SWITCH"
 CYCLE_ERROR = "CYCLE_ERROR"
+STATUS = "STATUS"                      # periodic "still running" summary (LiveConfig.status_every_min)
 
 
 class EventLog:

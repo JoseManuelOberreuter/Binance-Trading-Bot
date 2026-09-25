@@ -249,10 +249,11 @@ def test_engine_emits_activity_events(tmp_path):
     t2 = t1 + pd.Timedelta("12h")
     sig["sig"] = _signal(0, last_closed_bar_open(t2))
     eng.cycle(t2)                                              # exit (signal flat)
-    kinds = [e["type"] for e in eng.events.read()]
+    actions = [e for e in eng.events.read() if e["type"] != ev.STATUS]   # periodic summaries tested separately
+    kinds = [e["type"] for e in actions]
     assert kinds == [ev.POSITION_OPENED, ev.CANDLE_PROCESSED, ev.STOP_MOVED, ev.CANDLE_PROCESSED,
                      ev.POSITION_CLOSED, ev.CANDLE_PROCESSED]
-    opened, _, moved, _, closed, last = eng.events.read()
+    opened, _, moved, _, closed, last = actions
     assert opened["risk_usdt"] == pytest.approx(2_000 * 0.003, rel=1e-6)
     assert moved["old_stop"] == 1.38 and moved["new_stop"] == 1.45
     assert moved["locked_pnl"] == pytest.approx(50 * (1.45 - 1.50))
@@ -272,3 +273,26 @@ def test_skipped_entry_event_once_per_candle_and_dry_run_records_nothing(tmp_pat
     dry = _engine(tmp_path / "dry", FakeExchange(), sig, dry_run=True)
     dry.cycle(T0)
     assert dry.events.read() == []
+
+
+def test_equity_log_records_live_price_and_pnl_per_position(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    ex.prices[SYM] = 1.56                                        # +0.06 on 50 XRP
+    eng.cycle(T0 + pd.Timedelta(minutes=5))
+    last = eng.store.read_jsonl(eng.store.equity_path)[-1]
+    assert last["positions"][SYM]["price"] == pytest.approx(1.56)
+    assert last["positions"][SYM]["unrealized"] == pytest.approx(50 * 0.06)
+
+
+def test_status_summary_every_30_minutes(tmp_path):
+    from xrp_futures.execution import events as ev
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    for minutes in range(0, 65, 5):                              # 13 cycles, 5 min apart
+        eng.cycle(T0 + pd.Timedelta(minutes=minutes))
+    statuses = [e for e in eng.events.read() if e["type"] == ev.STATUS]
+    assert len(statuses) == 3                                    # at 0, 30 and 60 min
+    assert statuses[0]["market_up"] == 1 and statuses[0]["market_total"] == 1
+    assert statuses[0]["open_positions"] == 1

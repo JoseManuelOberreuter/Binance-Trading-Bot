@@ -54,8 +54,8 @@ def money(x: float | None, sign: bool = False) -> str:
     return f"{s}{abs(x):,.2f}"
 
 
-def pct(x: float) -> str:
-    return f"{'+' if x >= 0 else '−'}{abs(x):.1%}"
+def pct(x: float, decimals: int = 1) -> str:
+    return f"{'+' if x >= 0 else '−'}{abs(x):.{decimals}%}"
 
 
 def duration(hours: float | None) -> str:
@@ -188,6 +188,25 @@ def render(e: dict, tz: tzinfo) -> Message:
         return Message(t, "Tuve un problema en este ciclo; reintento en "
                           f"{int(e.get('retry_s', 300)) // 60} min. Los stops siguen activos en Binance.",
                        str(e.get("error", ""))[:120], level="warn")
+
+    if kind == ev.STATUS:
+        if e.get("kill_switch"):
+            head = "Sigo activo, con el kill-switch activado: solo gestiono las posiciones abiertas."
+        elif e.get("bot_paused"):
+            head = "Sigo activo, en pausa: no abro operaciones nuevas."
+        else:
+            head = "Sigo activo."
+        parts = []
+        if e.get("market_total"):
+            parts.append(f"Mercado: {e['market_up']} de {e['market_total']} al alza.")
+        n = e.get("open_positions", 0)
+        if n:
+            parts.append(f"{n} {'posición abierta' if n == 1 else 'posiciones abiertas'}, "
+                         f"no realizado {money(e.get('unrealized_pnl'), sign=True)}.")
+        else:
+            parts.append("Sin posiciones abiertas.")
+        parts.append(f"Capital {money(e.get('equity'))}.")
+        return Message(t, head, " ".join(parts))
 
     return Message(t, kind)
 

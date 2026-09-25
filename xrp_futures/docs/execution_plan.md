@@ -209,6 +209,18 @@ Decisiones confirmadas por el usuario:
     Los mensajes de ejemplo de abajo son del primer borrador (con emojis);
     el texto vigente está en `monitor/messages.py` y sus tests.
 
+28. **Reestructura en 5 pestañas** (el inicio anterior resultaba recargado):
+    **Inicio** = solo el capital total en grande + el resultado acumulado de
+    cada una de las 8 monedas (cerradas + abierta, como % del capital
+    inicial) + una línea de estado; **Consola** = bitácora + resumen
+    `STATUS` cada 30 min ("sigo activo…", `LiveConfig.status_every_min`) +
+    controles; **Monedas** = detalle por moneda (posición, precio y PnL en
+    vivo del último ciclo, stop, señal, historial); **Capital** = realizado,
+    no realizado, caída desde el máximo y gráfico 4 h / 1 día;
+    **Configuración**. El bot guarda además, en cada ciclo, precio y PnL por
+    posición (`equity_log.positions`) y las señales de la última vela
+    (`state.last_signals`).
+
 Eventos (tipo → mensaje):
 - `BOT_STARTED` → "▶️ Bot iniciado en testnet con $250 simulados."
 - `CANDLE_PROCESSED` (señales por moneda, acciones) → "🕛 Vela de las 12:00

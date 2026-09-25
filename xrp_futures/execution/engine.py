@@ -96,6 +96,7 @@ class LiveEngine:
         log.info("processing candle %s", bar_time)
         self._candle_actions = {"opened": 0, "closed": 0, "stops_moved": 0, "skipped": 0}
         self._rules(state, signals, snap)
+        state.last_signals = {s: sig.signal for s, sig in signals.items()}
         self.events.emit(ev.CANDLE_PROCESSED, bar_open_time=_iso(bar_time),
                          bar_close_time=_iso(bar_time + pd.Timedelta(self.config.strategy.timeframe)),
                          signals={s: sig.signal for s, sig in signals.items()},
@@ -308,12 +309,38 @@ class LiveEngine:
                         emit=False)
             self.events.emit(ev.KILL_SWITCH, equity=equity, drawdown=state.kill_switch.drawdown(equity))
         state.last_cycle_at = _iso(now)
+        self._maybe_status(state, snap, now, equity)
         if not self.dry_run:
             self.store.append_equity(dict(
                 time=_iso(now), equity=equity, wallet_equity=snap.wallet_equity, realized_pnl=state.realized_pnl,
                 unrealized_pnl=self._unrealized(state, snap), drawdown=state.kill_switch.drawdown(equity),
                 kill_switch=state.kill_switch.tripped, bot_paused=state.bot_paused,
-                open_positions=len(state.positions)))
+                open_positions=len(state.positions), positions=self._position_marks(state, snap)))
+
+    def _maybe_status(self, state: BotState, snap: Snapshot, now: pd.Timestamp, equity: float) -> None:
+        """Periodic console summary so the user can see the bot is alive between candles."""
+        every = pd.Timedelta(minutes=self.config.status_every_min)
+        if state.last_status_at and now - pd.Timestamp(state.last_status_at) < every:
+            return
+        sigs = list(state.last_signals.values())
+        self.events.emit(ev.STATUS, equity=equity, realized_pnl=state.realized_pnl,
+                         unrealized_pnl=self._unrealized(state, snap), open_positions=len(state.positions),
+                         market_up=sigs.count(1), market_down=sigs.count(-1), market_total=len(sigs),
+                         bot_paused=state.bot_paused, kill_switch=state.kill_switch.tripped)
+        state.last_status_at = _iso(now)
+
+    @staticmethod
+    def _position_marks(state: BotState, snap: Snapshot) -> dict[str, dict]:
+        """Per bot position: current price and unrealized PnL as Binance reports them (for the dashboard).
+        The price is derived from Binance's own unrealized PnL: entry + PnL / signed qty."""
+        marks = {}
+        for symbol, pos in state.positions.items():
+            remote = snap.positions.get(symbol)
+            if remote is None or remote.amt == 0:
+                continue
+            marks[symbol] = dict(price=remote.entry_price + remote.unrealized_pnl / float(remote.amt),
+                                 unrealized=remote.unrealized_pnl)
+        return marks
 
     # --------------------------------------------------------------- helpers ----
     def _alert(self, state: BotState, symbol: str | None, message: str, emit: bool = True,
