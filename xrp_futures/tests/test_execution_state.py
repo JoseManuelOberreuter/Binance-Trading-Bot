@@ -66,3 +66,15 @@ def test_jsonl_logs_append(tmp_path):
     rows = store.read_jsonl(store.trades_path)
     assert [r["symbol"] for r in rows] == ["XRPUSDT", "BNBUSDT"]
     assert json.loads(store.trades_path.read_text(encoding="utf-8").splitlines()[0])["net_pnl"] == 1.0
+
+
+def test_production_config_starts_paused_on_real_equity():
+    from xrp_futures.config.live import config_for
+    prod, test = config_for("production"), config_for("testnet")
+    assert prod.equity_override_usdt is None and prod.start_paused
+    assert test.equity_override_usdt == 250.0 and not test.start_paused
+    assert prod.universe == test.universe and prod.risk_pct == test.risk_pct and prod.strategy == test.strategy
+    state = BotState.new("production", prod)
+    assert state.bot_paused and state.simulated_capital is None
+    assert state.sizing_equity(80.0, 5.0) == 80.0            # real wallet, not simulated
+    assert not BotState.new("testnet", test).bot_paused

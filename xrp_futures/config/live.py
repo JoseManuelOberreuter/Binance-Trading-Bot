@@ -9,7 +9,7 @@ Strategy params are the frozen ones and must stay identical to the backtest
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from xrp_futures.backtest.engine import BacktestConfig
 from xrp_futures.backtest.costs import BASE
@@ -41,6 +41,7 @@ class LiveConfig:
     use_production_filters: bool = True
     bars_lookback: int = 300                     # 12h bars fetched per cycle (Donchian 40 + ATR warmup)
     status_every_min: int = 30                   # "still running" summary in the dashboard console (user-chosen)
+    start_paused: bool = False                   # first start with no new entries until the user activates it
 
     def backtest_config(self, initial_equity: float = 10_000.0) -> BacktestConfig:
         """The BacktestConfig equivalent to this live config (for live-vs-backtest checks)."""
@@ -53,3 +54,12 @@ class LiveConfig:
 
 
 DEFAULT = LiveConfig()
+
+# Real money (user-chosen 2026-10-11): same strategy and 8 coins, sized on the REAL futures
+# wallet (no simulated capital), and it starts paused — the user switches it on from the
+# dashboard when the account is funded. Small wallets will skip many signals (exchange minimums).
+PRODUCTION = replace(DEFAULT, equity_override_usdt=None, start_paused=True)
+
+
+def config_for(environment: str) -> LiveConfig:
+    return PRODUCTION if environment == "production" else DEFAULT

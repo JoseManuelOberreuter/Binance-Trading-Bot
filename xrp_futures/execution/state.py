@@ -61,7 +61,7 @@ class BotState:
     @classmethod
     def new(cls, environment: str, config: LiveConfig) -> "BotState":
         return cls(environment=environment, kill_switch=KillSwitch(config.kill_switch_drawdown),
-                   simulated_capital=config.equity_override_usdt)
+                   simulated_capital=config.equity_override_usdt, bot_paused=config.start_paused)
 
     def sizing_equity(self, wallet_equity: float, unrealized_pnl: float = 0.0) -> float:
         """

@@ -151,13 +151,21 @@ def latest_marks(view: BotView) -> dict[str, dict]:
     return marks.iloc[-1] if len(marks) and isinstance(marks.iloc[-1], dict) else {}
 
 
-def per_coin(state: BotState, trades: pd.DataFrame, marks: dict[str, dict], universe) -> dict[str, dict]:
+def starting_capital(state: BotState, equity: pd.DataFrame) -> float | None:
+    """Simulated capital, or (real-money mode) the account equity at the bot's first cycle."""
+    if state.simulated_capital is not None:
+        return state.simulated_capital
+    return float(equity["equity"].iloc[0]) if not equity.empty else None
+
+
+def per_coin(state: BotState, trades: pd.DataFrame, marks: dict[str, dict], universe,
+             capital0: float | None = None) -> dict[str, dict]:
     """
     Cumulative result per coin since the bot started: realized (closed trades, net of fees
     and funding) + unrealized (open position, from the last bot cycle). `pct` is relative
     to the starting capital — how much each coin has added to or taken from the account.
     """
-    capital0 = state.simulated_capital or 0.0
+    capital0 = capital0 if capital0 is not None else (state.simulated_capital or 0.0)
     out = {}
     for symbol in universe:
         mine = trades[trades["symbol"] == symbol] if not trades.empty and "symbol" in trades else trades.iloc[:0]

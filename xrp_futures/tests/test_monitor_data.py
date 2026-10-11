@@ -99,3 +99,14 @@ def test_per_coin_cumulative_result():
     assert r["BNBUSDT"]["total"] == pytest.approx(0.25) and r["BNBUSDT"]["n_trades"] == 2
     assert r["BTCUSDT"]["traded"] is False and r["BTCUSDT"]["pct"] is None
     assert data.per_coin(state, pd.DataFrame(), {}, ["BTCUSDT"])["BTCUSDT"]["total"] == 0.0
+
+
+def test_starting_capital_simulated_or_first_snapshot():
+    import pandas as pd
+    from xrp_futures.config.live import config_for
+    from xrp_futures.execution.state import BotState
+    from xrp_futures.monitor.data import starting_capital
+    eq = pd.DataFrame({"equity": [80.5, 82.0]})
+    assert starting_capital(BotState.new("testnet", config_for("testnet")), eq) == 250.0
+    assert starting_capital(BotState.new("production", config_for("production")), eq) == 80.5
+    assert starting_capital(BotState.new("production", config_for("production")), eq.iloc[:0]) is None

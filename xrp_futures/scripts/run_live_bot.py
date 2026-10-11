@@ -19,7 +19,7 @@ import time
 
 from binance.client import Client
 
-from xrp_futures.config.live import DEFAULT
+from xrp_futures.config.live import config_for
 from xrp_futures.execution.client import PRODUCTION, futures_environment, get_futures_client
 from xrp_futures.execution import events as ev
 from xrp_futures.execution.engine import LiveEngine
@@ -52,7 +52,7 @@ def main() -> None:
     if environment == PRODUCTION and not args.allow_production:
         raise SystemExit("FUTURES_ENVIRONMENT=production requires --allow-production (real money).")
 
-    config = DEFAULT
+    config = config_for(environment)
     store = StateStore(environment)
     setup_logging(store)
     client = get_futures_client(environment)

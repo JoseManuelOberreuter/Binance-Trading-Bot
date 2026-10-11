@@ -8,9 +8,10 @@ else), Consola (plain-language activity feed with a 30-min "still running" summa
 the controls), Monedas (per-coin detail), Capital (equity detail and chart), Configuración.
 Editorial, near-monochrome, no emojis; color only on gains/losses/warnings.
 
-Reads only the files the bot writes under live_state/<env>/; holds NO API keys and never
-talks to Binance — controls go through the command inbox and the bot applies them at its
-next cycle (<= 5 min).
+Two separate pages, never mixed: "Bot" reads only the files the bot writes under
+live_state/<env>/ (no API keys, never talks to Binance — controls go through the command
+inbox and the bot applies them at its next cycle, <= 5 min). "Cuenta Binance" shows the
+user's REAL account read-only via monitor/account.py (production key from .env).
 """
 
 from __future__ import annotations
@@ -27,9 +28,10 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from xrp_futures.config.live import DEFAULT as CONFIG
+from xrp_futures.config.live import DEFAULT as CONFIG, config_for
 from xrp_futures.execution import commands as cmdq
 from xrp_futures.execution.state import StateStore
+from xrp_futures.monitor import account as acc
 from xrp_futures.monitor import data
 from xrp_futures.monitor import messages as msg
 
@@ -53,7 +55,6 @@ header[data-testid="stHeader"], [data-testid="stSidebarCollapsedControl"] {{ dis
 .coin {{ padding:18px 8px; border-bottom:1px solid {LINE}; text-align:center; }}
 .coin .name {{ font-weight:600; font-size:0.95rem; }}
 .coin .pct {{ font-family:'JetBrains Mono', monospace; font-size:1.35rem; margin-top:4px; }}
-.coin .sub {{ color:{MUTED}; font-size:0.78rem; margin-top:2px; }}
 .footer-line {{ color:{MUTED}; font-size:0.85rem; text-align:center; margin-top:1.6rem; }}
 .feed-item {{ display:flex; gap:18px; padding:10px 0; border-bottom:1px solid {LINE}; }}
 .feed-item .t {{ color:{MUTED}; font-size:0.8rem; min-width:78px; padding-top:2px; }}
@@ -110,51 +111,82 @@ def submit(env: str, kind: str, symbol: str | None = None) -> None:
     st.rerun(scope="fragment")
 
 
-# ---------------------------------------------------------------- header ----
-head, env_col = st.columns([5, 1])
-envs = data.environments() or ["testnet"]
-default_env = os.getenv("FUTURES_ENVIRONMENT", "testnet")
-env = env_col.selectbox("Entorno", envs, index=envs.index(default_env) if default_env in envs else 0,
-                        label_visibility="collapsed")
-label = "<span class='bad'>producción · dinero real</span>" if env == "production" else "<span class='muted'>testnet</span>"
-head.markdown(f"<h3 style='margin:0'>Bot Futures <small style='font-size:0.9rem;font-weight:400'>&nbsp;{label}</small></h3>",
-              unsafe_allow_html=True)
+# ------------------------------------------------------------------ pages ----
+# Two pages that never share a screen, picked with the selector at the top right:
+#   Testnet — the bot on testnet (test money).
+#   Binance — the bot on the REAL account (production) plus a read-only "Cuenta" tab.
+VIEWS = ("Testnet", "Binance")
+
+
+def page_header(title: str, label: str, current: str) -> None:
+    head, select_col = st.columns([5, 1], vertical_alignment="center")
+    head.markdown(f"<h3 style='margin:0'>{title} <small style='font-size:0.9rem;font-weight:400'>&nbsp;{label}</small></h3>",
+                  unsafe_allow_html=True)
+    choice = select_col.selectbox("Vista", VIEWS, index=VIEWS.index(current), key=f"view_{current}",
+                                  label_visibility="collapsed")
+    if choice != current:
+        st.switch_page(TESTNET_PAGE if choice == "Testnet" else BINANCE_PAGE)
+
+
+def testnet_page() -> None:
+    page_header("Bot Futures", "<span class='muted'>testnet · dinero de prueba</span>", "Testnet")
+    main_view("testnet")
+
+
+def binance_page() -> None:
+    page_header("Bot Futures", "<span class='bad'>Binance · dinero real</span>", "Binance")
+    main_view("production")
 
 
 @st.fragment(run_every="30s")
-def main_view() -> None:
-    view = data.load(env, CONFIG)
+def main_view(env: str) -> None:
+    config = config_for(env)
+    view = data.load(env, config)
     state, now = view.state, pd.Timestamp.now(tz="UTC")
     if "flash" in st.session_state:
         st.caption(st.session_state.pop("flash"))
+    real = env == "production"
+
     if state is None:
-        html_block(f"<p class='muted'>El bot todavía no ha corrido en {env}. Inícialo con "
-                   "<code>python -m xrp_futures.scripts.run_live_bot</code>.</p>")
+        if not real:
+            html_block("<p class='muted'>El bot todavía no ha corrido en testnet. Inícialo con "
+                       "<code>python -m xrp_futures.scripts.run_live_bot</code>.</p>")
+            return
+        home, account = st.tabs(["Inicio", "Cuenta"])
+        with home:
+            html_block("<p class='muted' style='margin-top:1.4rem'>El bot real todavía no se ha iniciado. "
+                       "Cuando lo inicies arrancará <strong>en pausa</strong>: no abrirá nada hasta que lo actives aquí.</p>")
+        with account:
+            account_tab(now)
         return
 
-    alive, beat = data.heartbeat_status(state, now)
+    alive, _ = data.heartbeat_status(state, now)
     last = view.equity.iloc[-1] if not view.equity.empty else None
     equity = float(last["equity"]) if last is not None else (state.simulated_capital or 0.0)
     unrealized = float(last["unrealized_pnl"]) if last is not None and "unrealized_pnl" in last else 0.0
+    capital0 = data.starting_capital(state, view.equity) or equity
     marks = data.latest_marks(view)
-    coins = data.per_coin(state, view.trades, marks, CONFIG.universe)
+    coins = data.per_coin(state, view.trades, marks, config.universe, capital0)
 
-    home, console, coins_tab, capital, config = st.tabs(["Inicio", "Consola", "Monedas", "Capital", "Configuración"])
-    with home:
-        home_tab(state, equity, coins, alive, beat, now)
-    with console:
-        console_tab(view, state, unrealized, alive, now)
-    with coins_tab:
+    names = ["Inicio", "Consola", "Monedas", "Capital"] + (["Cuenta"] if real else []) + ["Configuración"]
+    tabs = dict(zip(names, st.tabs(names)))
+    with tabs["Inicio"]:
+        home_tab(state, equity, capital0, coins, alive, now, env)
+    with tabs["Consola"]:
+        console_tab(view, state, now, env)
+    with tabs["Monedas"]:
         coins_detail_tab(view, state, coins, marks, now)
-    with capital:
-        capital_tab(view, state, equity, unrealized)
-    with config:
-        config_tab(view)
+    with tabs["Capital"]:
+        capital_tab(view, state, equity, capital0, unrealized)
+    if real:
+        with tabs["Cuenta"]:
+            account_tab(now)
+    with tabs["Configuración"]:
+        config_tab(view, config)
 
 
 # ------------------------------------------------------------------ Inicio ----
-def home_tab(state, equity: float, coins: dict, alive: bool, beat: str, now: pd.Timestamp) -> None:
-    capital0 = state.simulated_capital or equity
+def home_tab(state, equity: float, capital0: float, coins: dict, alive: bool, now: pd.Timestamp, env: str) -> None:
     change = equity - capital0
     html_block(
         "<div class='hero'><div class='label'>Capital total</div>"
@@ -164,13 +196,9 @@ def home_tab(state, equity: float, coins: dict, alive: bool, beat: str, now: pd.
 
     cells = []
     for symbol, c in coins.items():
-        if c["traded"]:
-            pct = f"<div class='pct {cls_of(c['total'])}'>{msg.pct(c['pct'], 2)}</div>"
-            sub = f"<div class='sub num'>{msg.money(c['total'], sign=True)}</div>"
-        else:
-            pct = "<div class='pct muted'>—</div>"
-            sub = "<div class='sub'>sin operar</div>"
-        cells.append(f"<div class='coin'><div class='name'>{msg.coin(symbol)}</div>{pct}{sub}</div>")
+        pct = (f"<div class='pct {cls_of(c['total'])}'>{msg.pct(c['pct'], 2)}</div>" if c["traded"]
+               else "<div class='pct muted'>—</div>")
+        cells.append(f"<div class='coin'><div class='name'>{msg.coin(symbol)}</div>{pct}</div>")
     html_block(f"<div class='coins'>{''.join(cells)}</div>")
 
     nxt = msg.next_candle_close(now)
@@ -180,26 +208,39 @@ def home_tab(state, equity: float, coins: dict, alive: bool, beat: str, now: pd.
         status = "Kill-switch activo"
     elif state.bot_paused:
         status = "En pausa"
-    html_block(f"<div class='footer-line'><span class='dot' style='background:{dot}'></span>{status} · {beat} · "
-               f"próxima vela a las {nxt.tz_convert(TZ):%H:%M}</div>")
-    html_block("<div class='footer-line'>Porcentaje de cada moneda: lo que aportó al capital inicial, sumando "
-               "operaciones cerradas y la posición abierta.</div>")
+    html_block(f"<div class='footer-line'><span class='dot' style='background:{dot}'></span>{status} · "
+               f"próxima vela {nxt.tz_convert(TZ):%H:%M}</div>")
+    power_switch(state, env)
+
+
+def power_switch(state, env: str) -> None:
+    """On/off for new trades. Off = pause: opens nothing new, but stops and exits keep protecting
+    any open position (closing them is a separate, explicit control in Consola)."""
+    pending = {c["kind"] for c in cmdq.CommandQueue(StateStore(env).dir).pending()}
+    _, mid, _ = st.columns([2, 1, 2])
+    if pending & {cmdq.PAUSE_BOT, cmdq.RESUME_BOT}:
+        mid.caption("Cambio enviado; se aplica en el próximo ciclo.")
+    elif state.bot_paused:
+        if mid.button("Activar bot", type="primary", use_container_width=True, key=f"on_{env}"):
+            submit(env, cmdq.RESUME_BOT)
+    elif mid.button("Desactivar bot", use_container_width=True, key=f"off_{env}"):
+        submit(env, cmdq.PAUSE_BOT)
 
 
 # ----------------------------------------------------------------- Consola ----
-def console_tab(view, state, unrealized: float, alive: bool, now: pd.Timestamp) -> None:
-    line, ctrl = st.columns([4, 1])
-    line.markdown(f"<p class='muted' style='font-size:0.9rem;margin-top:6px'>"
-                  f"{esc(msg.standby_line(state, unrealized, view.last_candle, alive, now, TZ))}</p>",
-                  unsafe_allow_html=True)
+def console_tab(view, state, now: pd.Timestamp, env: str) -> None:
+    _, ctrl = st.columns([4, 1])
     with ctrl.popover("Controles", use_container_width=True):
-        controls(state)
+        controls(state, env)
     if view.commands_pending:
         st.caption("Pendiente: " + ", ".join(f"{LABELS[c['kind']]} {msg.coin(c.get('symbol'))}".strip()
                                              for c in view.commands_pending))
-    render_feed(view.events[-120:], now)
-    html_block(f"<p class='muted' style='font-size:0.8rem;margin-top:1rem'>Las acciones aparecen al instante; "
-               f"un resumen cada {CONFIG.status_every_min} min confirma que el bot sigue activo.</p>")
+    render_feed([e for e in view.events if not is_minimum_skip(e)][-120:], now)
+
+
+def is_minimum_skip(e: dict) -> bool:
+    """'No entré: la orden mínima…' repeats for the same coins every candle — noise in the console."""
+    return e.get("type") == "ENTRY_SKIPPED" and e.get("reason") == "below_minimum"
 
 
 def render_feed(events: list[dict], now: pd.Timestamp) -> None:
@@ -220,7 +261,7 @@ def render_feed(events: list[dict], now: pd.Timestamp) -> None:
     html_block("".join(rows))
 
 
-def controls(state) -> None:
+def controls(state, env: str) -> None:
     if state.bot_paused:
         if st.button("Reanudar bot", use_container_width=True):
             submit(env, cmdq.RESUME_BOT)
@@ -263,11 +304,9 @@ def coins_detail_tab(view, state, coins: dict, marks: dict, now: pd.Timestamp) -
     signal_text = SIGNAL_NAME[signal] if signal is not None else f"se sabrá a las {next_close:%H:%M}"
 
     html_block(
-        "<div class='metrics'>"
+        "<div class='metrics' style='grid-template-columns:repeat(3,1fr)'>"
         f"<div class='metric'><div class='label'>Resultado acumulado</div><div class='value {cls_of(c['total'])}'>"
         f"{msg.money(c['total'], sign=True) if c['traded'] else '—'}</div></div>"
-        f"<div class='metric'><div class='label'>Aporte al capital</div><div class='value {cls_of(c['total'])}'>"
-        f"{msg.pct(c['pct'], 2) if c['pct'] is not None else '—'}</div></div>"
         f"<div class='metric'><div class='label'>Operaciones cerradas</div><div class='value'>{c['n_trades']}</div></div>"
         f"<div class='metric'><div class='label'>Señal actual</div>"
         f"<div class='value' style=\"font-family:'Inter',sans-serif;font-size:1rem;padding-top:5px\">{signal_text}</div>"
@@ -280,20 +319,17 @@ def coins_detail_tab(view, state, coins: dict, marks: dict, now: pd.Timestamp) -
         mark = marks.get(symbol)
         stop = float(pos.stop_price)
         rows = [("Posición", f"{msg.side_name(pos.side)} · {pos.qty}"),
-                ("Entrada", f"<span class='num'>{msg.num(pos.entry_price)}</span> "
-                            f"<span class='muted'>· {when(pd.Timestamp(pos.entry_time), now)}</span>")]
+                ("Entrada", f"<span class='num'>{msg.num(pos.entry_price)}</span>")]
         if mark:
             notional = float(pos.qty) * pos.entry_price
             rows += [("Precio actual", f"<span class='num'>{msg.num(mark['price'])}</span>"),
                      ("PnL no realizado", f"{signed(mark['unrealized'])} "
                                           f"<span class='num muted'>({msg.pct(mark['unrealized'] / notional)})</span>")]
         ref = mark["price"] if mark else pos.entry_price
-        rows += [("Stop", f"<span class='num'>{msg.num(stop)}</span> <span class='num muted'>"
-                          f"({msg.pct((stop - ref) / ref)} desde el precio actual)</span>"),
-                 ("Riesgo si salta el stop", signed(pos.side * (stop - pos.entry_price) * float(pos.qty)))]
+        rows += [("Stop", f"<span class='num'>{msg.num(stop)}</span> "
+                          f"<span class='num muted'>({msg.pct((stop - ref) / ref)})</span>")]
         html_block("<table class='kv'>" + "".join(f"<tr><th style='width:38%'>{k}</th><td>{v}</td></tr>"
                                                   for k, v in rows) + "</table>")
-        st.caption("Precio y PnL según Binance, actualizados en cada ciclo del bot (cada 5 min).")
     else:
         html_block("<p class='muted'>Sin posición abierta en esta moneda.</p>")
 
@@ -306,9 +342,7 @@ def coins_detail_tab(view, state, coins: dict, marks: dict, now: pd.Timestamp) -
 
 
 # ----------------------------------------------------------------- Capital ----
-def capital_tab(view, state, equity: float, unrealized: float) -> None:
-    capital0 = state.simulated_capital or equity
-    peak = state.kill_switch.peak_equity or equity
+def capital_tab(view, state, equity: float, capital0: float, unrealized: float) -> None:
     dd = state.kill_switch.drawdown(equity)
     html_block(
         "<div class='metrics'>"
@@ -317,10 +351,8 @@ def capital_tab(view, state, equity: float, unrealized: float) -> None:
         f"{msg.money(state.realized_pnl, sign=True)}</div></div>"
         f"<div class='metric'><div class='label'>No realizado</div><div class='value {cls_of(unrealized)}'>"
         f"{msg.money(unrealized, sign=True)}</div></div>"
-        f"<div class='metric'><div class='label'>Caída desde el máximo ({msg.money(peak)})</div>"
+        f"<div class='metric'><div class='label'>Caída desde el máximo</div>"
         f"<div class='value {cls_of(dd)}'>{msg.pct(dd)}</div></div></div>")
-    html_block(f"<p class='muted' style='font-size:0.85rem'>El kill-switch se activa con una caída de "
-               f"{CONFIG.kill_switch_drawdown:.0%} desde el máximo.</p>")
 
     if len(view.equity) < 2:
         html_block("<p class='muted'>La curva aparece después de algunos ciclos del bot.</p>")
@@ -333,8 +365,6 @@ def capital_tab(view, state, equity: float, unrealized: float) -> None:
     points = data.equity_every(local, rule)
     if len(points) > 1:
         st.altair_chart(equity_chart(points, capital0, rule), use_container_width=True)
-        st.caption(f"Un punto cada {step}, con el último valor de cada intervalo. "
-                   "Línea punteada: capital inicial. Horas en la zona horaria de este PC.")
     else:
         html_block(f"<p class='muted'>Todavía hay un solo valor ({msg.money(float(points['equity'].iloc[-1]))}).</p>")
 
@@ -371,17 +401,134 @@ def equity_chart(points: pd.DataFrame, baseline: float, rule: str) -> alt.Chart:
     return (base + line).properties(height=260).configure_view(strokeWidth=0)
 
 
+# ---------------------------------------------------- Cuenta Binance (real) ----
+@st.cache_data(ttl=60, show_spinner=False)
+def account_snapshot() -> acc.AccountSnapshot | str:
+    """Real Binance account, read-only, refreshed at most once a minute. str = error message."""
+    try:
+        return acc.fetch_snapshot(acc.readonly_client())
+    except acc.AccountError as e:
+        return str(e)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def account_income() -> pd.DataFrame | str:
+    """Futures income history (~13 requests), refreshed every 10 minutes."""
+    try:
+        return acc.fetch_income(acc.readonly_client())
+    except acc.AccountError as e:
+        return str(e)
+
+
+def qty_text(q: float) -> str:
+    return f"{q:,.0f}" if q >= 1000 else f"{q:,.8g}"
+
+
+def metric(label: str, value: str, css: str = "") -> str:
+    return f"<div class='metric'><div class='label'>{label}</div><div class='value {css}'>{value}</div></div>"
+
+
+def account_tab(now: pd.Timestamp) -> None:
+    snap = account_snapshot()
+    if isinstance(snap, str):
+        html_block(f"<p class='bad'>No se pudo leer tu cuenta de Binance.</p><p class='muted'>{esc(snap)}</p>")
+        return
+    fut = snap.futures
+    html_block(
+        "<div class='hero' style='margin:1.6rem 0 1.8rem'><div class='label'>Saldo total en Binance</div>"
+        f"<div class='value'>{msg.money(snap.total)}</div>"
+        f"<div class='change muted'>Spot {msg.money(snap.spot_total)} · Futures {msg.money(fut.get('margin_balance', 0))}"
+        f" · USD, actualizado {when(snap.fetched_at, now)}</div></div>")
+    for err in snap.errors:
+        html_block(f"<p class='warn'>{esc(err)}</p>")
+
+    st.markdown("**Futures**")
+    unreal = fut.get("unrealized", 0.0)
+    html_block("<div class='metrics'>"
+               + metric("Billetera", msg.money(fut.get("wallet", 0)))
+               + metric("No realizado", msg.money(unreal, sign=True), cls_of(unreal))
+               + metric("Saldo de margen", msg.money(fut.get("margin_balance", 0)))
+               + metric("Disponible", msg.money(fut.get("available", 0))) + "</div>")
+    if snap.positions.empty:
+        html_block("<p class='muted'>Sin posiciones abiertas en Futures.</p>")
+    else:
+        head = "".join(f"<th>{h}</th>" for h in ("Par", "Lado", "Cantidad", "Entrada", "Actual", "PnL",
+                                                  "Apal.", "Liquidación"))
+        rows = []
+        for _, p in snap.positions.iterrows():
+            pnl_pct = f" <span class='num muted'>({msg.pct(p['pnl_pct'])})</span>" if pd.notna(p["pnl_pct"]) else ""
+            liq = (f"{msg.num(p['liq'])} <span class='muted'>({p['liq_dist']:.0%})</span>"
+                   if pd.notna(p["liq"]) else "—")
+            lev = f"{p['leverage']:.1f}x" if pd.notna(p["leverage"]) else "—"
+            rows.append(f"<tr><td>{esc(p['symbol'])}</td><td>{msg.side_name(int(p['side']))}</td>"
+                        f"<td class='num'>{p['qty']:g}</td><td class='num'>{msg.num(p['entry'])}</td>"
+                        f"<td class='num'>{msg.num(p['mark'])}</td><td>{signed(p['pnl'])}{pnl_pct}</td>"
+                        f"<td class='num'>{lev}</td><td class='num'>{liq}</td></tr>")
+        html_block(f"<table class='kv'><tr>{head}</tr>{''.join(rows)}</table>")
+
+    st.write("")
+    st.markdown("**Spot**")
+    spot = snap.spot
+    if spot.empty:
+        html_block("<p class='muted'>Sin saldos en Spot.</p>")
+    else:
+        big = spot[spot["value"].fillna(0) >= acc.DUST_USD]
+        small = spot[spot["value"].fillna(0) < acc.DUST_USD]
+        rows = [f"<tr><td>{esc(r['asset'])}</td><td class='num'>{qty_text(r['qty'])}</td>"
+                f"<td class='num'>{msg.num(r['price'])}</td><td class='num'>{msg.money(r['value'])}</td>"
+                f"<td class='num muted'>{r['share']:.1%}</td></tr>" for _, r in big.iterrows()]
+        if not small.empty:
+            rows.append(f"<tr><td class='muted'>Otros ({len(small)})</td><td></td><td></td>"
+                        f"<td class='num muted'>{msg.money(float(small['value'].fillna(0).sum()))}</td><td></td></tr>")
+        head = "".join(f"<th>{h}</th>" for h in ("Activo", "Cantidad", "Precio", "Valor", "% Spot"))
+        html_block(f"<table class='kv'><tr>{head}</tr>{''.join(rows)}</table>")
+
+    st.write("")
+    html_block(f"<p><strong>Historial Futures</strong> <span class='muted'>· últimos {acc.INCOME_DAYS} días</span></p>")
+    income = account_income()
+    if isinstance(income, str):
+        html_block(f"<p class='warn'>{esc(income)}</p>")
+        return
+    if income.empty:
+        html_block("<p class='muted'>Sin movimientos de Futures en este período.</p>")
+        return
+    by_type = income.groupby("type")["amount"].sum()
+    net = float(by_type.sum())
+    html_block("<div class='metrics'>"
+               + "".join(metric(name, msg.money(float(by_type.get(t, 0.0)), sign=True), cls_of(by_type.get(t, 0.0)))
+                         for t, name in acc.INCOME_TYPES.items())
+               + metric("Neto", msg.money(net, sign=True), cls_of(net)) + "</div>")
+
+    days = acc.income_by_day(income, TZ).rename("neto").reset_index().rename(columns={"time": "dia"})
+    if len(days) > 1:
+        bars = alt.Chart(days).mark_bar(size=6).encode(
+            x=alt.X("dia:T", title=None, axis=alt.Axis(grid=False, labelColor=MUTED, domainColor=LINE,
+                                                       format="%d-%m", labelAngle=0)),
+            y=alt.Y("neto:Q", title=None, axis=alt.Axis(gridColor=LINE, labelColor=MUTED, domain=False,
+                                                       format=",.0f", tickCount=5)),
+            color=alt.condition("datum.neto >= 0", alt.value(GOOD), alt.value(BAD)),
+            tooltip=[alt.Tooltip("dia:T", title="Día", format="%d-%m-%Y"),
+                     alt.Tooltip("neto:Q", title="Neto", format=",.2f")])
+        st.altair_chart(bars.properties(height=200).configure_view(strokeWidth=0), use_container_width=True)
+
+    table = acc.income_by_symbol(income)
+    head = "<tr><th>Par</th>" + "".join(f"<th>{n}</th>" for n in acc.INCOME_TYPES.values()) + "<th>Neto</th></tr>"
+    rows = [f"<tr><td>{esc(sym or '—')}</td>" + "".join(f"<td>{signed(float(r[t]))}</td>" for t in acc.INCOME_TYPES)
+            + f"<td>{signed(float(r['net']))}</td></tr>" for sym, r in table.iterrows()]
+    html_block(f"<table class='kv'>{head}{''.join(rows)}</table>")
+
+
 # ----------------------------------------------------------- Configuración ----
-def config_tab(view) -> None:
-    cap = CONFIG.equity_override_usdt
+def config_tab(view, config) -> None:
+    cap = config.equity_override_usdt
     rows = [
-        ("Monedas", ", ".join(msg.coin(s) for s in CONFIG.universe)),
-        ("Señal", f"Ruptura de {CONFIG.strategy.donchian_window} velas de {CONFIG.strategy.timeframe} (Donchian)"),
-        ("Stop", f"{CONFIG.initial_stop_atr_multiplier:g}×ATR inicial, luego trailing Chandelier "
-                 f"({CONFIG.chandelier_window} velas, {CONFIG.chandelier_multiplier:g}×ATR)"),
-        ("Riesgo por operación", f"{CONFIG.risk_pct:.1%} del capital"),
-        ("Apalancamiento", f"{CONFIG.leverage}x, margen aislado"),
-        ("Kill-switch", f"−{CONFIG.kill_switch_drawdown:.0%} desde el máximo"),
+        ("Monedas", ", ".join(msg.coin(s) for s in config.universe)),
+        ("Señal", f"Ruptura de {config.strategy.donchian_window} velas de {config.strategy.timeframe} (Donchian)"),
+        ("Stop", f"{config.initial_stop_atr_multiplier:g}×ATR inicial, luego trailing Chandelier "
+                 f"({config.chandelier_window} velas, {config.chandelier_multiplier:g}×ATR)"),
+        ("Riesgo por operación", f"{config.risk_pct:.1%} del capital"),
+        ("Apalancamiento", f"{config.leverage}x, margen aislado"),
+        ("Kill-switch", f"−{config.kill_switch_drawdown:.0%} desde el máximo"),
         ("Capital", f"{msg.money(cap)} simulados, más lo que gane o pierda el bot" if cap else "Saldo real de Futures"),
     ]
     html_block("<table class='kv'>" + "".join(f"<tr><th style='width:34%'>{k}</th><td>{esc(v)}</td></tr>"
@@ -391,9 +538,9 @@ def config_tab(view) -> None:
         st.markdown(f"""
 Cada 5 minutos el bot comprueba que lo que cree tener coincida con Binance y aplica tus controles.
 
-Al cerrar cada vela de {CONFIG.strategy.timeframe} (00:00 y 12:00 UTC), revisa cada moneda: si la señal cambió,
+Al cerrar cada vela de {config.strategy.timeframe} (00:00 y 12:00 UTC), revisa cada moneda: si la señal cambió,
 cierra; si sigue, sube el stop (nunca lo afloja); si no hay posición y hay señal, entra arriesgando
-{CONFIG.risk_pct:.1%} del capital.
+{config.risk_pct:.1%} del capital.
 
 Los stops viven en Binance, así que protegen las posiciones aunque el bot o el PC se apaguen. Si una orden
 queda bajo el mínimo de Binance, se omite en vez de agrandar el riesgo.
@@ -402,4 +549,6 @@ queda bajo el mínimo de Binance, se omite en vez de agrandar el riesgo.
         st.code("\n".join(view.log_tail[-100:]) or "(vacío)", language="log")
 
 
-main_view()
+TESTNET_PAGE = st.Page(testnet_page, title="Testnet", url_path="testnet", default=True)
+BINANCE_PAGE = st.Page(binance_page, title="Binance", url_path="binance")
+st.navigation([TESTNET_PAGE, BINANCE_PAGE], position="hidden").run()
