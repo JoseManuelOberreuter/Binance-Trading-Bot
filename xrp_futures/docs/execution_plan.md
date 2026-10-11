@@ -313,6 +313,35 @@ Arranque: `FUTURES_ENVIRONMENT=production` + `run_live_bot --allow-production`,
 luego **Activar bot** en la vista Binance. Simulación previa con
 `--dry-run --once`: lee la cuenta real y no envía nada.
 
+## Revisión de errores fatales (11-oct-2026, antes de activar dinero real)
+
+Revisión del código más fallas conocidas de bots en Binance Futures (timeouts con
+estado desconocido, crash del 10-oct-2025, reloj desfasado). Arreglado y con tests:
+
+38. **Entrada con respuesta perdida**: la entrada se guarda como *pendiente* (con su
+    `clientOrderId`) antes de enviarla. Si la respuesta se pierde (timeout, `-1007`,
+    `-1006`, red), el bot consulta la orden por ese id; si se ejecutó la adopta y le pone
+    su stop. Si Binance no la conoce tras 2 minutos, se da por no ejecutada. Un rechazo
+    claro (p.ej. `-2019` margen insuficiente) no queda pendiente. Antes, ese caso dejaba
+    una posición real **sin stop**, pausada como "posición ajena".
+39. **Un solo bot por entorno**: candado del sistema operativo en
+    `live_state/<env>/bot.lock`; un segundo proceso se niega a arrancar. Se libera solo
+    si el proceso muere.
+40. **Margen aislado obligatorio**: antes de cada entrada se verifica en Binance que la
+    moneda esté en margen aislado al apalancamiento del bot; si no, no entra y avisa.
+    En margen cruzado una liquidación puede vaciar la billetera, y con más
+    apalancamiento la liquidación queda antes que el stop.
+41. **Cada moneda falla por separado**: un error en una moneda no frena a las demás. Si
+    falla una salida, la vela no se marca como procesada y se reintenta en el próximo
+    ciclo (el stop sigue protegiendo).
+42. **Reloj sincronizado con Binance** en cada ciclo (`timestamp_offset`), para evitar
+    `-1021` cuando el PC se suspende o se desfasa.
+
+Pendiente de decisión del usuario: stops por precio *last* (como el backtest) o por
+*mark* (ignora mechas momentáneas). Conocido y aceptado: con el PC suspendido o con
+cambio de IP pública el bot queda ciego (los stops siguen en Binance); los retiros de
+Futures cuentan como caída para el kill-switch.
+
 ## Archivos
 
 ```
