@@ -27,7 +27,8 @@ class LiveConfig:
     initial_stop_atr_multiplier: float = 2.0     # BacktestConfig.atr_multiplier default used by the validated runs
     chandelier_window: int = 5
     chandelier_multiplier: float = 4.0
-    risk_pct: float = 0.003                      # per trade, on TOTAL account equity (user-confirmed)
+    risk_pct: float = 0.006                      # per trade, on TOTAL account equity (user-chosen 2026-10-11:
+                                                 # 4 coins at $250 -> hist. worst DD ~-24%, best year ~+96%)
     leverage: int = 3                            # margin tool only; isolated margin (user-confirmed)
     kill_switch_drawdown: float = 0.30           # block new entries at -30% from peak (user-confirmed)
     max_total_notional_pct: float = 1.0          # PROPOSED safety cap, not yet confirmed by the user

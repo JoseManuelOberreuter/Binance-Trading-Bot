@@ -18,7 +18,7 @@ from xrp_futures.execution.state import StateStore
 from xrp_futures.execution.symbol_filters import SymbolFilters
 
 SYM = "XRPUSDT"
-CONFIG = replace(LiveConfig(), universe=(SYM,), equity_override_usdt=2_000.0)
+CONFIG = replace(LiveConfig(), universe=(SYM,), equity_override_usdt=2_000.0, risk_pct=0.003)
 FILTERS = {SYM: SymbolFilters(SYM, Decimal("0.0001"), Decimal("0.1"), Decimal("0.1"), Decimal("5"))}
 T0 = pd.Timestamp("2026-09-24 12:05", tz="UTC")        # 5 min after the 12:00 close -> last closed = 00:00
 

@@ -7,7 +7,7 @@ from xrp_futures.config.live import LiveConfig
 from xrp_futures.execution.sizing import EntryPlan, Skip, plan_entry
 from xrp_futures.execution.symbol_filters import SymbolFilters
 
-CONFIG = LiveConfig()   # 0.3% risk, 2x ATR initial stop, 100% exposure cap
+CONFIG = replace(LiveConfig(), risk_pct=0.003)   # fixed 0.3% so the hand-checked numbers don't follow the live default
 XRP = SymbolFilters("XRPUSDT", Decimal("0.0001"), Decimal("0.1"), Decimal("0.1"), Decimal("5"))
 BTC = SymbolFilters("BTCUSDT", Decimal("0.1"), Decimal("0.001"), Decimal("0.001"), Decimal("50"))
 
