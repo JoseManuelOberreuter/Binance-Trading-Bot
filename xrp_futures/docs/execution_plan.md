@@ -140,7 +140,7 @@ y se cancelan con `futures_cancel_algo_order()`. `reconcile` y
 `check_futures_connectivity` deben leer los stops desde ahí.
 
 Decisiones confirmadas:
-19. **Trigger del stop = último precio** (`workingType=CONTRACT_PRICE`), igual
+19. *(Reemplazada por la 43.)* **Trigger del stop = último precio** (`workingType=CONTRACT_PRICE`), igual
     que el backtest (máximos/mínimos de vela). `priceProtect` desactivado
     (podría impedir que el stop se dispare en un crash).
 20. **Prueba inicial autorizada** (testnet): abrir ~$6 de XRP, poner un stop
@@ -337,8 +337,15 @@ estado desconocido, crash del 10-oct-2025, reloj desfasado). Arreglado y con tes
 42. **Reloj sincronizado con Binance** en cada ciclo (`timestamp_offset`), para evitar
     `-1021` cuando el PC se suspende o se desfasa.
 
-Pendiente de decisión del usuario: stops por precio *last* (como el backtest) o por
-*mark* (ignora mechas momentáneas). Conocido y aceptado: con el PC suspendido o con
+43. **Stops por precio *mark*** (`workingType=MARK_PRICE`, decisión del usuario,
+    reemplaza la 19): el precio justo que Binance promedia de varios exchanges ignora
+    mechas momentáneas del último precio (como el crash del 10-oct-2025), que pueden
+    disparar un stop en el peor punto. Costo: en una caída real el stop se activa algo
+    más tarde y el vivo se aleja levemente del backtest. Configurable en
+    `LiveConfig.stop_working_type`; verificado en testnet. Los stops ya abiertos
+    en testnet siguen por último precio hasta que el bot los mueva.
+
+Conocido y aceptado: con el PC suspendido o con
 cambio de IP pública el bot queda ciego (los stops siguen en Binance); los retiros de
 Futures cuentan como caída para el kill-switch.
 
