@@ -1,4 +1,6 @@
 import inspect
+
+import numpy as np
 import re
 
 import pandas as pd
@@ -95,3 +97,55 @@ def test_snapshot_total_and_partial_failure():
 def test_module_never_calls_write_endpoints():
     src = inspect.getsource(acc)
     assert not re.search(r"\.\w*(create|cancel|transfer|withdraw|order|change|leverage)\w*\(", src)
+
+
+# ---- holding exit rules (reference indicator) ----------------------------------------
+def _series(values):
+    return pd.Series(values, index=pd.date_range("2024-01-01", periods=len(values), freq="D", tz="UTC"), dtype=float)
+
+
+def test_closed_daily_closes_drops_the_candle_in_progress():
+    day = 86_400_000
+    kl = [[0, "1", "1", "1", "10", "0", day - 1], [day, "1", "1", "1", "11", "0", 2 * day - 1]]
+    now = pd.to_datetime(day + 5, unit="ms", utc=True)          # second candle still open
+    assert list(acc.closed_daily_closes(kl, now)) == [10.0]
+
+
+def test_trail_exits_after_25pct_drop_and_reenters_on_50_day_high():
+    up = list(range(100, 160))                       # peak 159
+    down = [159 * 0.74] * 5                          # -26% -> out
+    t = acc.trail_state(_series(up + down))
+    assert not t["inside"] and t["reentry_level"] == 159
+    back = up + down + [160]                         # close above the prior 50-day high -> in again
+    t = acc.trail_state(_series(back))
+    assert t["inside"] and t["peak"] == 160 and t["exit_level"] == pytest.approx(120)
+
+
+def test_trail_state_matches_the_backtested_rule():
+    """Same state machine as the spot backtest: replay it independently and compare every day."""
+    rng = np.random.default_rng(7)
+    closes = _series(100 * np.cumprod(1 + rng.normal(0, 0.05, 700)))
+    hi = closes.rolling(50).max().shift(1)
+    inside, peak = True, closes.iloc[0]
+    for i, (px, h) in enumerate(zip(closes, hi)):
+        if inside:
+            peak = max(peak, px)
+            inside = px > peak * 0.75
+        elif not np.isnan(h) and px > h:
+            inside, peak = True, px
+        assert acc.trail_state(closes.iloc[: i + 1])["inside"] == inside
+
+
+def test_holding_signal_sma_and_distances():
+    closes = _series([1.0] * 199 + [3.0])            # sma200 = 1.01
+    sig = acc.holding_signal(closes, price=2.0)
+    assert sig["sma_in"] and sig["vs_sma"] == pytest.approx(2.0 / 1.01 - 1)
+    assert sig["trail_in"] and sig["exit_level"] == pytest.approx(2.25)
+    assert sig["level_dist"] == pytest.approx(0.125)
+    short = acc.holding_signal(_series([1.0] * 30), price=1.0)
+    assert short["sma200"] is None and short["trail_in"] is None
+
+
+def test_rule_assets_skip_stables_dust_and_unpriced():
+    spot = pd.DataFrame({"asset": ["PEPE", "USDT", "SHIB", "ZZZ"], "value": [490.0, 50.0, 0.000002, None]})
+    assert acc.rule_assets(spot) == ["PEPE"]

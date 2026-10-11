@@ -60,6 +60,9 @@ class ReadOnlyBinance:
     def futures_income(self, start_ms: int, end_ms: int) -> list[dict]:
         return self._c.futures_income_history(startTime=start_ms, endTime=end_ms, limit=1000)
 
+    def daily_klines(self, symbol: str, limit: int = 1000) -> list[list]:
+        return self._c.get_klines(symbol=symbol, interval="1d", limit=limit)
+
 
 def readonly_client() -> ReadOnlyBinance:
     key, secret = os.getenv("BINANCE_API_KEY", "").strip(), os.getenv("BINANCE_SECRET", "").strip()
@@ -243,3 +246,68 @@ def fetch_income(client: ReadOnlyBinance, days: int = INCOME_DAYS) -> pd.DataFra
     except BinanceAPIException as e:
         raise AccountError(explain(e)) from e
     return parse_income(raw, prices)
+
+
+# -------------------------------------------------------- holding exit rules ----
+# Reference only (never orders): the two exit rules backtested on the user's Spot holdings
+# (2026-10-11). Both decide on the daily CLOSE.
+#   sma200  — in while the close is above its 200-day average
+#   trail25 — sell if the close falls 25% from the highest close since (re)entry; re-buy
+#             on a close above the prior 50-day high
+SMA_DAYS = 200
+TRAIL_PCT = 0.25
+REENTRY_DAYS = 50
+RULE_HISTORY_DAYS = 1000          # daily candles fetched (one request) to replay trail25's state
+
+
+def closed_daily_closes(klines: list[list], now: pd.Timestamp) -> pd.Series:
+    """Daily close series from raw klines, dropping the candle still in progress."""
+    rows = [(pd.to_datetime(int(k[0]), unit="ms", utc=True), float(k[4]), int(k[6])) for k in klines]
+    now_ms = int(now.timestamp() * 1000)
+    return pd.Series({t: c for t, c, close_ms in rows if close_ms < now_ms}, dtype=float)
+
+
+def trail_state(closes: pd.Series, trail: float = TRAIL_PCT, reentry_days: int = REENTRY_DAYS) -> dict:
+    """Replay trail25 over the history: whether it's in now, and its exit / re-entry levels."""
+    prior_high = closes.rolling(reentry_days).max().shift(1)
+    inside, peak = True, closes.iloc[0]
+    for px, high in zip(closes, prior_high):
+        if inside:
+            peak = max(peak, px)
+            if px <= peak * (1 - trail):
+                inside = False
+        elif high == high and px > high:          # high == high: not NaN
+            inside, peak = True, px
+    return {"inside": inside, "peak": peak, "exit_level": peak * (1 - trail) if inside else None,
+            "reentry_level": None if inside else float(prior_high.iloc[-1] if len(closes) else float("nan"))}
+
+
+def holding_signal(closes: pd.Series, price: float) -> dict:
+    """Both rules' current verdict for one holding, plus distances from the live price."""
+    sma = float(closes.tail(SMA_DAYS).mean()) if len(closes) >= SMA_DAYS else None
+    t = trail_state(closes) if len(closes) > REENTRY_DAYS else None
+    out = {"price": price, "sma200": sma, "sma_in": closes.iloc[-1] > sma if sma else None,
+           "vs_sma": price / sma - 1 if sma else None, "trail_in": t["inside"] if t else None,
+           "exit_level": t["exit_level"] if t else None, "reentry_level": t["reentry_level"] if t else None}
+    level = out["exit_level"] or out["reentry_level"]
+    out["level_dist"] = level / price - 1 if level and price else None
+    return out
+
+
+def fetch_daily_closes(client: ReadOnlyBinance, asset: str) -> pd.Series | None:
+    """Closed daily candles of `asset` against the first USD quote that exists."""
+    now = pd.Timestamp.now(tz="UTC")
+    for quote in QUOTES:
+        try:
+            closes = closed_daily_closes(client.daily_klines(asset + quote, RULE_HISTORY_DAYS), now)
+        except BinanceAPIException:
+            continue                           # no such pair: try the next quote
+        if len(closes):
+            return closes
+    return None
+
+
+def rule_assets(spot: pd.DataFrame, min_value: float = DUST_USD) -> list[str]:
+    """Spot holdings the exit rules apply to: worth at least `min_value`, not stablecoins."""
+    return [r["asset"] for _, r in spot.iterrows()
+            if r["asset"] not in STABLES and r["value"] == r["value"] and r["value"] and r["value"] >= min_value]

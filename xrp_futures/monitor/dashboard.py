@@ -424,6 +424,47 @@ def qty_text(q: float) -> str:
     return f"{q:,.0f}" if q >= 1000 else f"{q:,.8g}"
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def holding_closes(asset: str) -> pd.Series | None:
+    """Daily closes for the exit-rule indicator (daily candles: once an hour is plenty)."""
+    try:
+        return acc.fetch_daily_closes(acc.readonly_client(), asset)
+    except acc.AccountError:
+        return None
+
+
+def holding_rules(spot: pd.DataFrame) -> None:
+    """Reference only: what the two backtested exit rules say today. Never places orders."""
+    rows = []
+    for asset in acc.rule_assets(spot):
+        closes = holding_closes(asset)
+        price = float(spot.loc[spot["asset"] == asset, "price"].iloc[0])
+        if closes is None or not len(closes):
+            continue
+        sig = acc.holding_signal(closes, price)
+        if sig["sma200"] is None:
+            sma = "<span class='muted'>poca historia</span>"
+        else:
+            state = "<span class='good'>sobre</span>" if sig["sma_in"] else "<span class='bad'>bajo</span>"
+            sma = f"{state} <span class='num muted'>({msg.pct(sig['vs_sma'])})</span>"
+        if sig["trail_in"] is None:
+            trail = "<span class='muted'>poca historia</span>"
+        elif sig["trail_in"]:
+            trail = (f"<span class='good'>mantener</span> · saldría bajo <span class='num'>{msg.num(sig['exit_level'])}</span>"
+                     f" <span class='num muted'>({msg.pct(sig['level_dist'])})</span>")
+        else:
+            trail = (f"<span class='bad'>fuera</span> · volvería sobre <span class='num'>{msg.num(sig['reentry_level'])}</span>"
+                     f" <span class='num muted'>({msg.pct(sig['level_dist'])})</span>")
+        rows.append(f"<tr><td>{esc(asset)}</td><td>{sma}</td><td>{trail}</td></tr>")
+    if not rows:
+        return
+    st.write("")
+    html_block("<p><strong>Reglas de salida</strong> <span class='muted'>· referencia histórica, "
+               "no son órdenes ni asesoría</span></p>")
+    head = "<tr><th style='width:16%'>Activo</th><th style='width:30%'>Media 200 días</th><th>Stop móvil −25%</th></tr>"
+    html_block(f"<table class='kv'>{head}{''.join(rows)}</table>")
+
+
 def metric(label: str, value: str, css: str = "") -> str:
     return f"<div class='metric'><div class='label'>{label}</div><div class='value {css}'>{value}</div></div>"
 
@@ -482,6 +523,7 @@ def account_tab(now: pd.Timestamp) -> None:
                         f"<td class='num muted'>{msg.money(float(small['value'].fillna(0).sum()))}</td><td></td></tr>")
         head = "".join(f"<th>{h}</th>" for h in ("Activo", "Cantidad", "Precio", "Valor", "% Spot"))
         html_block(f"<table class='kv'><tr>{head}</tr>{''.join(rows)}</table>")
+        holding_rules(spot)
 
     st.write("")
     html_block(f"<p><strong>Historial Futures</strong> <span class='muted'>· últimos {acc.INCOME_DAYS} días</span></p>")
