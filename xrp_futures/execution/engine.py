@@ -14,6 +14,15 @@ Safety rules: a position is never left without a stop (new stop placed before th
 is cancelled; if a stop can't be placed after an entry, the position is closed and the
 symbol paused); a stop level the market has already crossed is executed at market
 (the backtest's gap-through), since Binance rejects stops that would trigger at once.
+
+Fatal-error review (2026-10-11, docs decisions 38-42):
+  - an entry is recorded as *pending* before it's sent; if the response is lost (timeout,
+    -1007, network) the order is looked up by its client id and, if it executed, adopted
+    with its stop — never left as an unprotected "unknown position"
+  - entries require ISOLATED margin at the configured leverage (checked on Binance)
+  - each symbol fails on its own: one coin's error never blocks the others; a failed
+    exit leaves the candle unprocessed so it's retried next cycle (the stop still protects)
+  - signed-request timestamps are re-aligned with Binance's clock every cycle
 """
 
 from __future__ import annotations
@@ -30,13 +39,15 @@ from xrp_futures.execution import commands as cmdq
 from xrp_futures.execution import events as ev
 from xrp_futures.execution import reconcile as rc
 from xrp_futures.execution.live_signal import LiveSignal
-from xrp_futures.execution.order_manager import Fill, Snapshot
+from xrp_futures.execution.order_manager import Fill, Snapshot, new_client_id, outcome_unknown
 from xrp_futures.execution.sizing import Skip, plan_entry
 from xrp_futures.execution.state import BotState, Position, StateStore
 from xrp_futures.execution.symbol_filters import SymbolFilters
 from xrp_futures.risk import stops as stp
 
 log = logging.getLogger("xfb")
+
+PENDING_GIVE_UP = pd.Timedelta(minutes=2)   # an order Binance still doesn't know after this never executed
 
 
 def last_closed_bar_open(now: pd.Timestamp, timeframe: str = "12h") -> pd.Timestamp:
@@ -64,15 +75,28 @@ class LiveEngine:
         self.events = ev.EventLog(store.dir, enabled=not dry_run)
         self.dry_run = dry_run
         self._candle_actions: dict[str, int] = {}
+        self._now = pd.Timestamp.now(tz="UTC")
 
     # ------------------------------------------------------------------ cycle ----
     def cycle(self, now: pd.Timestamp | None = None) -> BotState:
         now = now if now is not None else pd.Timestamp.now(tz="UTC")
+        self._now = now
         state = self.store.load(self.config)
+        try:
+            self.exchange.sync_clock()
+        except Exception as e:     # not fatal by itself; signed calls will say if it matters
+            log.warning("clock sync failed: %s", e)
+        if state.pending_entries:
+            self._resolve_pending(state, now)
         snap = self.exchange.snapshot()
 
         for action in rc.reconcile(state, snap.positions, snap.stops, self.config.universe):
-            self._apply_reconcile(state, action)
+            if action.symbol in state.pending_entries:
+                continue           # outcome of its entry still unknown: don't treat as foreign
+            try:
+                self._apply_reconcile(state, action)
+            except Exception as e:
+                self._symbol_error(state, action.symbol, f"reconcile {action.kind}", e)
 
         self._apply_commands(state, snap)
 
@@ -82,52 +106,65 @@ class LiveEngine:
             stale = [s for s, sig in signals.items() if sig.bar_open_time != target]
             if stale:
                 log.info("candle %s not published yet for %s; retry next cycle", target, stale)
-            else:
-                self._process_candle(state, signals, snap)
+            elif self._process_candle(state, signals, snap):
                 state.last_processed_bar = _iso(target)
+            else:
+                log.warning("an exit failed on candle %s; retrying next cycle (stops still active)", target)
 
         self._update_equity(state, snap, now)
         self._save(state)
         return state
 
     # ------------------------------------------------------------- candle rules ----
-    def _process_candle(self, state: BotState, signals: dict[str, LiveSignal], snap: Snapshot) -> None:
+    def _process_candle(self, state: BotState, signals: dict[str, LiveSignal], snap: Snapshot) -> bool:
+        """Apply the candle's rules. False if an exit failed (the candle must be retried)."""
         bar_time = next(iter(signals.values())).bar_open_time
         log.info("processing candle %s", bar_time)
         self._candle_actions = {"opened": 0, "closed": 0, "stops_moved": 0, "skipped": 0}
-        self._rules(state, signals, snap)
+        exits_ok = self._rules(state, signals, snap)
         state.last_signals = {s: sig.signal for s, sig in signals.items()}
         self.events.emit(ev.CANDLE_PROCESSED, bar_open_time=_iso(bar_time),
                          bar_close_time=_iso(bar_time + pd.Timedelta(self.config.strategy.timeframe)),
                          signals={s: sig.signal for s, sig in signals.items()},
                          closes={s: sig.close for s, sig in signals.items()},
                          actions=self._candle_actions, open_positions=len(state.positions))
+        return exits_ok
 
     def _count(self, action: str) -> None:
         if action in self._candle_actions:
             self._candle_actions[action] += 1
 
-    def _rules(self, state: BotState, signals: dict[str, LiveSignal], snap: Snapshot) -> None:
+    def _rules(self, state: BotState, signals: dict[str, LiveSignal], snap: Snapshot) -> bool:
+        exits_ok = True
         for symbol in self.config.universe:          # 1) exits / trailing
             pos = state.positions.get(symbol)
             if pos is None or symbol in state.paused:
                 continue
             sig = signals[symbol]
-            if sig.signal != pos.side:
-                self._close(state, symbol, reason="signal")
-            else:
-                self._trail(state, symbol, sig)
+            try:
+                if sig.signal != pos.side:
+                    self._close(state, symbol, reason="signal")
+                else:
+                    self._trail(state, symbol, sig)
+            except Exception as e:                   # one coin's failure never blocks the others
+                self._symbol_error(state, symbol, "exit/trail", e)
+                exits_ok = exits_ok and sig.signal == pos.side   # a failed trail is retried next candle
 
         for symbol in self.config.universe:          # 2) entries
             sig = signals[symbol]
-            if symbol in state.positions or symbol in state.paused or sig.signal == 0:
+            if (symbol in state.positions or symbol in state.paused or symbol in state.pending_entries
+                    or sig.signal == 0):
                 continue
             if state.bot_paused:
                 log.info("%s: %s signal, bot paused -> no entry", symbol, "LONG" if sig.signal == 1 else "SHORT")
                 self._count("skipped")
                 self.events.emit(ev.ENTRY_SKIPPED, symbol=symbol, side=sig.signal, reason="bot_paused")
                 continue
-            self._enter(state, symbol, sig, snap)
+            try:
+                self._enter(state, symbol, sig, snap)
+            except Exception as e:
+                self._symbol_error(state, symbol, "entry", e)
+        return exits_ok
 
     def _enter(self, state: BotState, symbol: str, sig: LiveSignal, snap: Snapshot) -> None:
         price = self.exchange.mark_price(symbol)
@@ -142,23 +179,82 @@ class LiveEngine:
                              target_usdt=plan.target_usdt, limit_usdt=plan.limit_usdt)
             return
 
-        fill = self.exchange.market_order(symbol, plan.side, plan.qty, reduce_only=False)
+        problem = self.exchange.ensure_margin(symbol, self.config.leverage)
+        if problem:
+            log.warning("%s: entry skipped, margin mode is %s", symbol, problem)
+            self._count("skipped")
+            self.events.emit(ev.ENTRY_SKIPPED, symbol=symbol, side=sig.signal, reason="margin_mode")
+            self._alert(state, symbol, f"margin is {problem}; no entries until it's fixed", code="MARGIN_MODE")
+            return
+
+        cid = new_client_id("e", symbol)
+        state.pending_entries[symbol] = dict(client_id=cid, side=plan.side, atr=sig.atr, equity=equity,
+                                             created=_iso(self._now))
+        self._save(state)      # persisted BEFORE sending, so a crash right after can be recovered
+        try:
+            fill = self.exchange.market_order(symbol, plan.side, plan.qty, reduce_only=False, client_id=cid)
+        except Exception as e:
+            if not outcome_unknown(e):           # definite rejection (e.g. insufficient margin)
+                del state.pending_entries[symbol]
+                self._save(state)
+                raise
+            log.warning("%s: entry response lost (%s); checking whether it executed", symbol, e)
+            try:
+                fill = self.exchange.entry_status(symbol, cid)
+            except Exception:
+                fill = None
+            if fill is None:                     # not visible yet: decide next cycle
+                self._alert(state, symbol, f"entry order outcome unknown ({e}); checking again next cycle",
+                            code="ENTRY_UNKNOWN")
+                return
+        del state.pending_entries[symbol]
+        self._open_position(state, symbol, plan.side, fill, sig.atr, equity)
+
+    def _resolve_pending(self, state: BotState, now: pd.Timestamp) -> bool:
+        """Settle entries whose response was lost. True if any position was adopted."""
+        adopted = False
+        for symbol, p in list(state.pending_entries.items()):
+            try:
+                fill = self.exchange.entry_status(symbol, p["client_id"])
+            except Exception as e:
+                log.warning("%s: pending entry %s still unknown: %s", symbol, p["client_id"], e)
+                continue
+            if fill is None:
+                if now - pd.Timestamp(p["created"]) < PENDING_GIVE_UP:
+                    continue                     # Binance may not show it yet
+                del state.pending_entries[symbol]
+                log.info("%s: pending entry %s never executed", symbol, p["client_id"])
+                self._save(state)
+                continue
+            del state.pending_entries[symbol]
+            self._alert(state, symbol, "entry executed despite the lost response; adopted with its stop",
+                        code="ENTRY_RECOVERED")
+            try:
+                self._open_position(state, symbol, p["side"], fill, p["atr"], p["equity"])
+                adopted = True
+            except Exception as e:
+                self._symbol_error(state, symbol, "adopt pending entry", e)
+        return adopted
+
+    def _open_position(self, state: BotState, symbol: str, plan_side: int, fill: Fill, atr: float,
+                       equity: float) -> None:
+        """Record a filled entry and protect it with its initial stop (closes it if that fails)."""
         stop = self.filters[symbol].round_price(
-            stp.atr_stop_price(fill.price, sig.atr, self.config.initial_stop_atr_multiplier, plan.side))
+            stp.atr_stop_price(fill.price, atr, self.config.initial_stop_atr_multiplier, plan_side))
         state.positions[symbol] = Position(
-            symbol=symbol, side=plan.side, qty=str(fill.qty), entry_price=fill.price,
+            symbol=symbol, side=plan_side, qty=str(fill.qty), entry_price=fill.price,
             entry_time=_iso(pd.Timestamp(fill.time_ms, unit="ms", tz="UTC")), stop_price=str(stop),
             entry_order_id=fill.order_id, entry_commission=fill.commission)
         self._save(state)   # the position exists on Binance now — persist before anything else can fail
         log.info("%s: OPEN %s %s @ %.6g, stop %s (equity %.2f)", symbol,
-                 "LONG" if plan.side == 1 else "SHORT", fill.qty, fill.price, stop, equity)
+                 "LONG" if plan_side == 1 else "SHORT", fill.qty, fill.price, stop, equity)
         self._count("opened")
-        self.events.emit(ev.POSITION_OPENED, symbol=symbol, side=plan.side, qty=str(fill.qty), price=fill.price,
+        self.events.emit(ev.POSITION_OPENED, symbol=symbol, side=plan_side, qty=str(fill.qty), price=fill.price,
                          notional=float(fill.qty) * fill.price, stop=float(stop),
                          stop_pct=abs(fill.price - float(stop)) / fill.price,
                          risk_usdt=float(fill.qty) * abs(fill.price - float(stop)), equity=equity)
         try:
-            state.positions[symbol].stop_client_order_id = self.exchange.place_stop(symbol, plan.side, fill.qty, stop)
+            state.positions[symbol].stop_client_order_id = self.exchange.place_stop(symbol, plan_side, fill.qty, stop)
         except Exception as e:  # never leave a position unprotected
             self._alert(state, symbol, f"stop placement failed after entry ({e}); closing position",
                         code="STOP_FAILED")
@@ -343,6 +439,10 @@ class LiveEngine:
         return marks
 
     # --------------------------------------------------------------- helpers ----
+    def _symbol_error(self, state: BotState, symbol: str | None, what: str, e: Exception) -> None:
+        log.exception("%s: %s failed", symbol, what)
+        self._alert(state, symbol, f"{what} failed: {type(e).__name__}: {e}"[:300], code="SYMBOL_ERROR")
+
     def _alert(self, state: BotState, symbol: str | None, message: str, emit: bool = True,
                code: str = "GENERIC") -> None:
         log.warning("ALERT %s%s", f"{symbol}: " if symbol else "", message)

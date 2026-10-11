@@ -33,6 +33,21 @@ class FakeExchange:
         self.calls: list[str] = []
         self.next_id = 1
         self.fail_stop = False
+        self.margin_problem = None           # e.g. "CROSSED 20x (expected ISOLATED 3x)"
+        self.lose_response = None            # exception raised AFTER an entry executes (lost response)
+        self.reject_entry = None             # exception raised INSTEAD of executing (definite rejection)
+        self.orders: dict[str, Fill] = {}    # client_id -> fill, for entry_status lookups
+        self.order_visible = True            # False: Binance doesn't show the order yet (-2013)
+
+    def sync_clock(self):            # a read, not an action: counted apart from `calls`
+        self.clock_syncs = getattr(self, "clock_syncs", 0) + 1
+        return 0
+
+    def ensure_margin(self, symbol, leverage):
+        return self.margin_problem
+
+    def entry_status(self, symbol, client_id):
+        return self.orders.get(client_id) if self.order_visible else None
 
     def snapshot(self):
         positions = {}
@@ -51,7 +66,9 @@ class FakeExchange:
         return Fill(self.next_id, price, qty, commission=float(qty) * price * 0.0005, realized_pnl=realized,
                     time_ms=int(T0.value // 10**6))
 
-    def market_order(self, symbol, side, qty, reduce_only):
+    def market_order(self, symbol, side, qty, reduce_only, client_id=None):
+        if not reduce_only and self.reject_entry:
+            raise self.reject_entry
         self.calls.append(f"market {side} {qty} reduce={reduce_only}")
         realized = 0.0
         if reduce_only:
@@ -59,7 +76,12 @@ class FakeExchange:
             self.position = Decimal("0")
         else:
             self.position, self.entry_price = side * qty, self.prices[SYM]
-        return self._fill(qty, realized)
+        fill = self._fill(qty, realized)
+        if client_id:
+            self.orders[client_id] = fill
+        if not reduce_only and self.lose_response:
+            raise self.lose_response
+        return fill
 
     def place_stop(self, symbol, position_side, qty, stop_price):
         if self.fail_stop:
@@ -296,3 +318,102 @@ def test_status_summary_every_30_minutes(tmp_path):
     assert len(statuses) == 3                                    # at 0, 30 and 60 min
     assert statuses[0]["market_up"] == 1 and statuses[0]["market_total"] == 1
     assert statuses[0]["open_positions"] == 1
+
+
+# ---- fatal-error review (2026-10-11) -------------------------------------------------
+def test_lost_entry_response_is_adopted_with_its_stop(tmp_path):
+    """Timeout after the order executed: the position must get its stop, not be 'unknown'."""
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    ex.lose_response = TimeoutError("read timed out")
+    state = _engine(tmp_path, ex, sig).cycle(T0)
+    assert ex.position == Decimal("50.0")
+    assert SYM in state.positions and SYM not in state.paused and not state.pending_entries
+    assert list(ex.stops) == [state.positions[SYM].stop_client_order_id]
+
+
+def test_entry_invisible_at_first_is_adopted_next_cycle(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    ex.lose_response, ex.order_visible = TimeoutError("read timed out"), False
+    eng = _engine(tmp_path, ex, sig)
+    state = eng.cycle(T0)
+    assert SYM in state.pending_entries and SYM not in state.positions
+    assert SYM not in state.paused                  # NOT treated as a foreign position
+    ex.lose_response, ex.order_visible = None, True
+    state = eng.cycle(T0 + pd.Timedelta(minutes=5))
+    assert not state.pending_entries and SYM not in state.paused
+    assert list(ex.stops) == [state.positions[SYM].stop_client_order_id]
+
+
+def test_pending_entry_that_never_executed_is_dropped_after_grace(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    ex.reject_entry, ex.order_visible = TimeoutError("read timed out"), False
+    eng = _engine(tmp_path, ex, sig)
+    assert SYM in eng.cycle(T0).pending_entries
+    assert SYM in eng.cycle(T0 + pd.Timedelta(minutes=1)).pending_entries    # still within the grace period
+    state = eng.cycle(T0 + pd.Timedelta(minutes=5))
+    assert not state.pending_entries and not state.positions and ex.position == 0
+
+
+def test_definite_rejection_is_not_left_pending(tmp_path):
+    from binance.exceptions import BinanceAPIException
+    resp = type("R", (), {"text": ""})()
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    ex.reject_entry = BinanceAPIException(resp, 400, '{"code": -2019, "msg": "Margin is insufficient."}')
+    state = _engine(tmp_path, ex, sig).cycle(T0)
+    assert not state.pending_entries and not state.positions
+    assert state.last_processed_bar is not None     # an entry failure doesn't stall the candle
+
+
+def test_entry_blocked_unless_isolated_at_bot_leverage(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    ex.margin_problem = "CROSSED 20x (expected ISOLATED 3x)"
+    eng = _engine(tmp_path, ex, sig)
+    state = eng.cycle(T0)
+    assert not state.positions and ex.calls == []
+    alerts = StateStore("testnet", root=tmp_path).read_jsonl(StateStore("testnet", root=tmp_path).alerts_path)
+    assert "CROSSED 20x" in alerts[-1]["message"]
+
+
+def test_one_symbol_failing_does_not_block_the_others(tmp_path):
+    other = "ADAUSDT"
+    config = replace(CONFIG, universe=(SYM, other))
+    filters = {**FILTERS, other: SymbolFilters(other, Decimal("0.0001"), Decimal("1"), Decimal("1"), Decimal("5"))}
+
+    class TwoCoins(FakeExchange):
+        def mark_price(self, symbol):
+            if symbol == SYM:
+                raise ConnectionError("XRP endpoint down")
+            return 1.50
+
+    ex = TwoCoins()
+    sigs = {SYM: _signal(1, last_closed_bar_open(T0)),
+            other: LiveSignal(other, last_closed_bar_open(T0), close=1.5, signal=1, atr=0.06,
+                              chandelier_long=1.3, chandelier_short=1.7)}
+    eng = LiveEngine(config, ex, lambda s: sigs[s], filters, StateStore("testnet", root=tmp_path))
+    state = eng.cycle(T0)
+    assert other in state.positions and SYM not in state.positions
+
+
+def test_failed_exit_leaves_candle_for_retry(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(1, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    t1 = T0 + pd.Timedelta("12h")
+    sig["sig"] = _signal(-1, last_closed_bar_open(t1))
+    real_market = ex.market_order
+    ex.market_order = lambda *a, **k: (_ for _ in ()).throw(ConnectionError("down"))
+    state = eng.cycle(t1)
+    assert state.last_processed_bar == last_closed_bar_open(T0).isoformat()   # not advanced
+    assert SYM in state.positions and len(ex.stops) == 1                       # stop still protects
+    ex.market_order = real_market
+    state = eng.cycle(t1 + pd.Timedelta(minutes=5))
+    assert state.last_processed_bar == last_closed_bar_open(t1).isoformat()
+    assert state.positions[SYM].side == -1                                     # exit + reversal done
+
+
+def test_clock_is_synced_every_cycle(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(0, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    eng.cycle(T0 + pd.Timedelta(minutes=5))
+    assert ex.clock_syncs == 2

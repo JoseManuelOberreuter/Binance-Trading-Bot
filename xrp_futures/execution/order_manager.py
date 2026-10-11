@@ -32,6 +32,14 @@ from xrp_futures.execution.symbol_filters import SymbolFilters
 log = logging.getLogger("xfb")
 
 SEVEN_DAYS_MS = 7 * 24 * 3600 * 1000
+# Binance codes meaning "the order may or may not have executed" (send/execution status
+# unknown). Any other API error on an order is a definite rejection.
+UNKNOWN_STATUS_CODES = {-1001, -1006, -1007}
+
+
+def outcome_unknown(exc: Exception) -> bool:
+    """True if, after this exception, an order we sent might still have executed."""
+    return not isinstance(exc, BinanceAPIException) or exc.code in UNKNOWN_STATUS_CODES
 
 
 @dataclass(frozen=True)
@@ -74,6 +82,13 @@ class BinanceFuturesExchange:
         self.filters = filters
 
     # ---- reads -------------------------------------------------------------------
+    def sync_clock(self) -> int:
+        """Align signed-request timestamps with Binance's clock (avoids -1021 after the PC
+        sleeps or drifts). Returns the offset applied, in ms."""
+        server = int(self.client.futures_time()["serverTime"])
+        self.client.timestamp_offset = server - int(time.time() * 1000)
+        return self.client.timestamp_offset
+
     def snapshot(self) -> Snapshot:
         account = self.client.futures_account()
         return Snapshot(
@@ -92,6 +107,24 @@ class BinanceFuturesExchange:
             except LookupError:
                 time.sleep(0.5 * (attempt + 1))   # fills can lag the order response briefly
         raise LookupError(f"{symbol}: fills for order {order_id} not available")
+
+    def entry_status(self, symbol: str, client_id: str) -> Fill | None:
+        """
+        What happened to an entry order whose response was lost: its Fill if it executed,
+        None if Binance has no such order (or it ended unfilled). Raises LookupError while
+        it's still being processed, and lets other errors through (status still unknown).
+        """
+        try:
+            order = self.client.futures_get_order(symbol=symbol, origClientOrderId=client_id)
+        except BinanceAPIException as e:
+            if e.code == -2013:          # order does not exist
+                return None
+            raise
+        if float(order.get("executedQty", 0)) > 0 and order["status"] != "NEW":
+            return self.order_fill(symbol, int(order["orderId"]))
+        if order["status"] in ("NEW", "PARTIALLY_FILLED"):
+            raise LookupError(f"{symbol}: entry {client_id} still {order['status']}")
+        return None
 
     def stop_fill(self, symbol: str, client_algo_id: str) -> Fill | None:
         """Fill of a stop that triggered while the bot wasn't watching; None if it didn't."""
@@ -134,9 +167,21 @@ class BinanceFuturesExchange:
                 log.warning("%s: %s failed: %s (%s) — current: %s %sx", symbol, call.__name__, e.message, e.code,
                             current["marginType"], current["leverage"])
 
-    def market_order(self, symbol: str, side: int, qty: Decimal, reduce_only: bool) -> Fill:
+    def ensure_margin(self, symbol: str, leverage: int) -> str | None:
+        """Make sure the symbol is ISOLATED at `leverage` before entering. Returns None if so,
+        else what it actually is. Cross margin would let one liquidation drain the whole
+        wallet, and a higher leverage puts liquidation closer than the stop."""
+        self.setup_symbol(symbol, leverage)
+        current = self.client.futures_symbol_config(symbol=symbol)[0]
+        if current["marginType"] != "ISOLATED" or int(current["leverage"]) != leverage:
+            return f"{current['marginType']} {current['leverage']}x (expected ISOLATED {leverage}x)"
+        return None
+
+    def market_order(self, symbol: str, side: int, qty: Decimal, reduce_only: bool,
+                     client_id: str | None = None) -> Fill:
+        client_id = client_id or new_client_id("x" if reduce_only else "e", symbol)
         params = dict(symbol=symbol, side="BUY" if side == 1 else "SELL", type="MARKET", quantity=str(qty),
-                      newClientOrderId=new_client_id("x" if reduce_only else "e", symbol), newOrderRespType="RESULT")
+                      newClientOrderId=client_id, newOrderRespType="RESULT")
         if reduce_only:
             params["reduceOnly"] = "true"
         order = self.client.futures_create_order(**params)
@@ -164,8 +209,18 @@ class DryRunExchange:
         self.real = real
         self.writes: list[str] = []
 
+    def sync_clock(self) -> int:
+        return self.real.sync_clock()
+
     def snapshot(self) -> Snapshot:
         return self.real.snapshot()
+
+    def entry_status(self, symbol: str, client_id: str) -> Fill | None:
+        return None    # dry run never sends entries
+
+    def ensure_margin(self, symbol: str, leverage: int) -> str | None:
+        self._record(f"ensure {symbol} ISOLATED {leverage}x")
+        return None
 
     def mark_price(self, symbol: str) -> float:
         return self.real.mark_price(symbol)
@@ -183,7 +238,8 @@ class DryRunExchange:
     def setup_symbol(self, symbol: str, leverage: int) -> None:
         self._record(f"set {symbol} ISOLATED {leverage}x")
 
-    def market_order(self, symbol: str, side: int, qty: Decimal, reduce_only: bool) -> Fill:
+    def market_order(self, symbol: str, side: int, qty: Decimal, reduce_only: bool,
+                     client_id: str | None = None) -> Fill:
         price = self.mark_price(symbol)
         self._record(f"{'BUY' if side == 1 else 'SELL'} {qty} {symbol} at market"
                      f"{' (reduce-only)' if reduce_only else ''} ~{price}")

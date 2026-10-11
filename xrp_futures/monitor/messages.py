@@ -81,6 +81,7 @@ SKIP_REASONS = {
     "bot_paused": "El bot está en pausa.",
     "invalid_atr": "Faltan datos de volatilidad.",
     "exposure_cap": "Superaría el tope de exposición total.",
+    "margin_mode": "La moneda no está en margen aislado con el apalancamiento del bot.",
 }
 
 ALERTS = {
@@ -90,6 +91,12 @@ ALERTS = {
     "CLOSED_EXTERNALLY": "La posición se cerró en Binance, pero no por el stop del bot. No conozco el resultado exacto.",
     "UNKNOWN_POSITION": "Hay una posición en Binance que el bot no abrió. No la toco; pausé la moneda hasta que la revises.",
     "QTY_MISMATCH": "La cantidad en Binance no coincide con la del bot. Pausé la moneda hasta que la revises.",
+    "MARGIN_MODE": "La moneda no quedó en margen aislado con el apalancamiento del bot; no abro nada en ella "
+                   "hasta que se corrija.",
+    "ENTRY_UNKNOWN": "Se perdió la respuesta de Binance a una compra/venta. Reviso en el próximo ciclo si se "
+                     "ejecutó y, si fue así, le pongo su stop.",
+    "ENTRY_RECOVERED": "La orden sí se había ejecutado pese a la respuesta perdida; la registré con su stop.",
+    "SYMBOL_ERROR": "Hubo un error con esta moneda; las demás siguen normales. Los stops siguen activos.",
 }
 
 COMMANDS = {

@@ -13,6 +13,7 @@ DataFrame/dict out) and tested without network.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -39,6 +40,10 @@ class ReadOnlyBinance:
 
     def __init__(self, api_key: str, api_secret: str):
         self._c = Client(api_key, api_secret)
+        try:   # align signed-request timestamps with Binance (avoids -1021 if the PC clock drifts)
+            self._c.timestamp_offset = int(self._c.get_server_time()["serverTime"]) - int(time.time() * 1000)
+        except Exception:
+            pass
 
     def spot_balances(self) -> list[dict]:
         return self._c.get_account(omitZeroBalances="true")["balances"]

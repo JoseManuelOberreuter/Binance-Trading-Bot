@@ -25,6 +25,7 @@ from xrp_futures.execution import events as ev
 from xrp_futures.execution.engine import LiveEngine
 from xrp_futures.execution.live_signal import compute_live_signal, fetch_closed_bars
 from xrp_futures.execution.order_manager import BinanceFuturesExchange, DryRunExchange
+from xrp_futures.execution.process_lock import AlreadyRunning, ProcessLock
 from xrp_futures.execution.state import StateStore
 from xrp_futures.execution.symbol_filters import load_filters
 
@@ -54,6 +55,12 @@ def main() -> None:
 
     config = config_for(environment)
     store = StateStore(environment)
+    if not args.dry_run:      # one live process per environment (dry runs send nothing)
+        try:
+            lock = ProcessLock(store.dir / "bot.lock").acquire()   # held until the process exits
+        except AlreadyRunning:
+            raise SystemExit(f"Another bot is already running on {environment}. Stop it first "
+                             "(two bots on one account would double every order).")
     setup_logging(store)
     client = get_futures_client(environment)
     filters = load_filters(client, config.universe, config.use_production_filters)
@@ -69,6 +76,7 @@ def main() -> None:
     log.info("start: env=%s dry_run=%s universe=%s risk=%.2f%% leverage=%dx simulated_capital=%s",
              environment, args.dry_run, ",".join(config.universe), config.risk_pct * 100, config.leverage,
              config.equity_override_usdt)
+    exchange.sync_clock()
     for symbol in config.universe:
         exchange.setup_symbol(symbol, config.leverage)
     engine.events.emit(ev.BOT_STARTED, environment=environment, simulated_capital=config.equity_override_usdt,
