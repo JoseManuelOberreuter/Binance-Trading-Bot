@@ -278,6 +278,41 @@ servidor reconozca las posiciones abiertas; (4) arrancar servicios y
 verificar un ciclo sin alertas; (5) `tailscale up` + `tailscale serve`.
 Actualizaciones posteriores: commit en el PC y `deploy/deploy.sh <ip> <llave>`.
 
+## Fase 7 adelantada — bot real y vista de la cuenta (decisiones del usuario, 11-oct-2026)
+
+El usuario decidió preparar el bot con dinero real sin esperar los 1-2 meses de
+testnet de la Fase 6. Para que eso no implique operar sin querer, el bot real
+**arranca en pausa** y solo abre posiciones cuando el usuario lo activa.
+
+32. **Riesgo por operación: 0.6%** del equity total (antes 0.3%). Elegido tras
+    el estudio de escalamiento con $250 en 4 monedas: peor caída histórica
+    mark-to-market ~−24%, mejor año ~+96%. Sin recordatorio de retiro: se
+    acumula el capital.
+33. **Bot real = misma estrategia y las 8 monedas**, dimensionado sobre el
+    **saldo real de Futures** (`config_for("production")`: sin capital
+    simulado). Con ~$80 la mayoría de las señales se omiten por el mínimo de
+    Binance (solo XRP, BNB, SOL y ADA caben); el usuario agregará capital.
+34. **Arranca en pausa** (`start_paused`): el primer inicio no abre nada. El
+    botón **Activar / Desactivar bot** de Inicio envía RESUME/PAUSE por el
+    buzón de comandos. Desactivado = no abre nada nuevo; los stops y salidas
+    siguen protegiendo lo abierto.
+35. **Solo el bot opera la cuenta de Futures** (sin trading manual en
+    paralelo), para que capital y resultados sean 100% del bot.
+36. **Margen en USDT**: el bot opera pares USDT con margen aislado, así que
+    el saldo debe estar en USDT. El modo Multi-Assets no sirve (exige margen
+    cruzado).
+37. **Dashboard: selector Testnet | Binance** arriba a la derecha; las dos
+    vistas nunca comparten pantalla. Binance muestra el bot real y una pestaña
+    **Cuenta** de solo lectura (`monitor/account.py`): Spot, billetera y
+    posiciones de Futures (incluidas las manuales) e historial de 90 días
+    (PnL, comisiones, funding), actualizado cada minuto. Usa
+    `BINANCE_API_KEY`, restringida a la IP pública del PC; el módulo solo
+    llama endpoints de lectura (verificado por un test).
+
+Arranque: `FUTURES_ENVIRONMENT=production` + `run_live_bot --allow-production`,
+luego **Activar bot** en la vista Binance. Simulación previa con
+`--dry-run --once`: lee la cuenta real y no envía nada.
+
 ## Archivos
 
 ```
@@ -314,7 +349,7 @@ xrp_futures/tests/
 | 4 | ✅ Hecha: `order_manager` + `engine` + `run_live_bot`; primer ciclo real en testnet (24-sep): 4 posiciones + 4 stops algo verificados en Binance, sin duplicados en ciclos siguientes. Pendiente: ver un trailing y una salida reales | — |
 | 5 | ✅ Hecha: dashboard Streamlit con 4 controles vía buzón de comandos (`streamlit run xrp_futures/monitor/dashboard.py`) | — |
 | 6 | Testnet desatendido, **1-2 meses**, en PC siempre encendido o VPS | Sin errores de estado; operaciones coinciden con un backtest de la misma ventana |
-| 7 | **Real con capital chico**, 3-6 meses (monto a decidir: ~$2.000 para operar las 8; con menos se omiten monedas — ver decisión 15) | Slippage/comisiones reales cercanos al modelo; resultado dentro de lo esperable |
+| 7 | **Adelantada (11-oct)**: bot real listo, arranca en pausa (decisiones 32-37). **Real con capital chico**, 3-6 meses (monto a decidir: ~$2.000 para operar las 8; con menos se omiten monedas — ver decisión 15) | Slippage/comisiones reales cercanos al modelo; resultado dentro de lo esperable |
 | 8 | Decisión de escalar capital | Decisión manual, con los datos de la Fase 7 |
 
 **Regla de detención (fijada antes de empezar):** caída de 30% desde el
