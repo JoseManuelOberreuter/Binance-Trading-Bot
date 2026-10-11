@@ -44,6 +44,8 @@ def num(x: float | None) -> str:
         return "—"
     if x >= 100:
         return f"{x:,.2f}"
+    if 0 < abs(x) < 0.01:
+        return f"{x:.4g}" if abs(x) >= 1e-4 else f"{x:.8f}".rstrip("0")   # meme-coin prices: keep 4 significant digits
     return f"{x:,.4f}"
 
 
