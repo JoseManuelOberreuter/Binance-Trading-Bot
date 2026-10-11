@@ -5,7 +5,7 @@ BinanceFuturesExchange is the ONLY place that sends orders. Formats were verifie
 testnet by scripts/probe_testnet_stop.py:
   - market orders: futures_create_order; the response has no fill price, so fills
     (price, commission, realizedPnl) are read back from futures_account_trades(orderId)
-  - stops: algo STOP_MARKET (clientAlgoId, triggerPrice), listed by
+  - stops: algo STOP_MARKET (clientAlgoId, triggerPrice, trigger on mark price by default), listed by
     futures_get_open_algo_orders, cancelled by futures_cancel_algo_order
 Every order id carries the bot prefix (reconcile.BOT_PREFIX) so the bot only ever
 manages its own orders.
@@ -77,9 +77,12 @@ def aggregate_fills(order_id: int, trades: list[dict]) -> Fill:
 
 
 class BinanceFuturesExchange:
-    def __init__(self, client: Client, filters: dict[str, SymbolFilters]):
+    def __init__(self, client: Client, filters: dict[str, SymbolFilters], stop_working_type: str = "MARK_PRICE"):
+        if stop_working_type not in ("MARK_PRICE", "CONTRACT_PRICE"):
+            raise ValueError(f"stop_working_type must be MARK_PRICE or CONTRACT_PRICE, got {stop_working_type!r}")
         self.client = client
         self.filters = filters
+        self.stop_working_type = stop_working_type
 
     # ---- reads -------------------------------------------------------------------
     def sync_clock(self) -> int:
@@ -192,7 +195,7 @@ class BinanceFuturesExchange:
         self.client.futures_create_algo_order(
             algoType="CONDITIONAL", symbol=symbol, side="SELL" if position_side == 1 else "BUY",
             type="STOP_MARKET", quantity=str(qty), triggerPrice=str(stop_price), reduceOnly="true",
-            workingType="CONTRACT_PRICE", priceProtect="FALSE", clientAlgoId=cid)
+            workingType=self.stop_working_type, priceProtect="FALSE", clientAlgoId=cid)
         return cid
 
     def cancel_stop(self, symbol: str, client_algo_id: str) -> None:

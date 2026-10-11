@@ -42,6 +42,10 @@ class LiveConfig:
     bars_lookback: int = 300                     # 12h bars fetched per cycle (Donchian 40 + ATR warmup)
     status_every_min: int = 30                   # "still running" summary in the dashboard console (user-chosen)
     start_paused: bool = False                   # first start with no new entries until the user activates it
+    # Stop trigger price: MARK_PRICE (Binance's multi-exchange fair price) ignores momentary
+    # last-price wicks like the 10-oct-2025 flash crash; CONTRACT_PRICE (last trade) matches the
+    # backtest's candles more closely but can fire at the bottom of a wick (user-chosen 2026-10-11: mark).
+    stop_working_type: str = "MARK_PRICE"
 
     def backtest_config(self, initial_equity: float = 10_000.0) -> BacktestConfig:
         """The BacktestConfig equivalent to this live config (for live-vs-backtest checks)."""

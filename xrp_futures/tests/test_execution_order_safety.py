@@ -71,3 +71,25 @@ def test_sync_clock_sets_offset():
     client = FakeClient()
     BinanceFuturesExchange(client, {}).sync_clock()
     assert client.timestamp_offset != 0
+
+
+class StopClient(FakeClient):
+    def futures_create_algo_order(self, **kw):
+        self.sent = kw
+
+
+@pytest.mark.parametrize("working_type", ["MARK_PRICE", "CONTRACT_PRICE"])
+def test_stop_uses_configured_trigger_price(working_type):
+    client = StopClient()
+    BinanceFuturesExchange(client, {}, working_type).place_stop("XRPUSDT", 1, Decimal("50"), Decimal("1.30"))
+    assert client.sent["workingType"] == working_type and client.sent["reduceOnly"] == "true"
+
+
+def test_default_stop_trigger_is_mark_price():
+    from xrp_futures.config.live import DEFAULT, config_for
+    assert DEFAULT.stop_working_type == config_for("production").stop_working_type == "MARK_PRICE"
+    client = StopClient()
+    BinanceFuturesExchange(client, {}).place_stop("XRPUSDT", -1, Decimal("50"), Decimal("1.70"))
+    assert client.sent["workingType"] == "MARK_PRICE" and client.sent["side"] == "BUY"
+    with pytest.raises(ValueError):
+        BinanceFuturesExchange(client, {}, "LAST")

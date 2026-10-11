@@ -64,7 +64,7 @@ def main() -> None:
     setup_logging(store)
     client = get_futures_client(environment)
     filters = load_filters(client, config.universe, config.use_production_filters)
-    exchange = BinanceFuturesExchange(client, filters)
+    exchange = BinanceFuturesExchange(client, filters, config.stop_working_type)
     if args.dry_run:
         exchange = DryRunExchange(exchange)
 
