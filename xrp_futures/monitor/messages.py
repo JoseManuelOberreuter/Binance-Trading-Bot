@@ -181,6 +181,10 @@ def render(e: dict, tz: tzinfo) -> Message:
         if not e.get("ok", True):
             return Message(t, f"No se pudo aplicar tu comando ({e.get('command')} {coin(e.get('symbol'))}).",
                            level="warn")
+        if e.get("command") == cmdq.SET_CAPITAL:
+            v = e.get("value")
+            return Message(t, f"Capital del bot: {money(v)} más lo que gane o pierda desde ahora." if v is not None
+                           else "Capital del bot: todo el saldo de Futures.")
         text = COMMANDS.get(e.get("command"), "Comando {command} aplicado.")
         return Message(t, text.format(coin=coin(e.get("symbol")), command=e.get("command")))
 

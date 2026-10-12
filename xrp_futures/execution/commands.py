@@ -24,9 +24,10 @@ CLOSE_POSITION = "CLOSE_POSITION"
 PAUSE_SYMBOL = "PAUSE_SYMBOL"
 RESUME_SYMBOL = "RESUME_SYMBOL"
 RESET_KILL_SWITCH = "RESET_KILL_SWITCH"
+SET_CAPITAL = "SET_CAPITAL"      # value: USDT the bot may use (None = the whole futures wallet)
 
 NEEDS_SYMBOL = {CLOSE_POSITION, PAUSE_SYMBOL, RESUME_SYMBOL}
-ALL = {PAUSE_BOT, RESUME_BOT, CLOSE_POSITION, PAUSE_SYMBOL, RESUME_SYMBOL, RESET_KILL_SWITCH}
+ALL = {PAUSE_BOT, RESUME_BOT, CLOSE_POSITION, PAUSE_SYMBOL, RESUME_SYMBOL, RESET_KILL_SWITCH, SET_CAPITAL}
 
 
 class CommandQueue:
@@ -36,13 +37,18 @@ class CommandQueue:
         self.processing = self.dir / "commands.processing.jsonl"
         self.done = self.dir / "commands_done.jsonl"
 
-    def submit(self, kind: str, symbol: str | None = None, source: str = "dashboard") -> dict:
+    def submit(self, kind: str, symbol: str | None = None, source: str = "dashboard",
+               value: float | None = None) -> dict:
         if kind not in ALL:
             raise ValueError(f"unknown command {kind!r}")
         if kind in NEEDS_SYMBOL and not symbol:
             raise ValueError(f"{kind} needs a symbol")
+        if kind == SET_CAPITAL and value is not None and not value > 0:
+            raise ValueError("capital must be positive (or None for the whole wallet)")
         cmd = {"id": uuid.uuid4().hex[:12], "kind": kind, "symbol": symbol, "source": source,
                "submitted_at": datetime.now(timezone.utc).isoformat()}
+        if kind == SET_CAPITAL:
+            cmd["value"] = value
         self.dir.mkdir(parents=True, exist_ok=True)
         with open(self.inbox, "a", encoding="utf-8") as f:
             f.write(json.dumps(cmd) + "\n")

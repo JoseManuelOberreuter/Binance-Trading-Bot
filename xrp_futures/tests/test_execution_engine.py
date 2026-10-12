@@ -417,3 +417,23 @@ def test_clock_is_synced_every_cycle(tmp_path):
     eng.cycle(T0)
     eng.cycle(T0 + pd.Timedelta(minutes=5))
     assert ex.clock_syncs == 2
+
+
+def test_set_capital_command_resizes_next_entries(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(0, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    cmdq.CommandQueue(StateStore("testnet", root=tmp_path).dir).submit(cmdq.SET_CAPITAL, value=1_000.0)
+    t1 = T0 + pd.Timedelta("12h")
+    sig["sig"] = _signal(1, last_closed_bar_open(t1))
+    state = eng.cycle(t1)
+    assert state.assigned_capital == 1_000.0
+    assert state.positions[SYM].qty == "25.0"            # half of the $2,000 case: 1000*0.3%/8% = $37.5 -> 25 XRP
+
+
+def test_set_capital_validation():
+    import pytest as _pytest
+    q = cmdq.CommandQueue
+    with _pytest.raises(ValueError):
+        q.__new__(q).submit(cmdq.SET_CAPITAL, value=0)
+

@@ -78,3 +78,32 @@ def test_production_config_starts_paused_on_real_equity():
     assert state.bot_paused and state.simulated_capital is None
     assert state.sizing_equity(80.0, 5.0) == 80.0            # real wallet, not simulated
     assert not BotState.new("testnet", test).bot_paused
+
+
+def test_assigned_capital_reinvests_gains_but_never_exceeds_the_wallet():
+    from xrp_futures.config.live import config_for
+    s = BotState.new("production", config_for("production"))   # whole wallet
+    s.realized_pnl = 30.0
+    assert s.sizing_equity(1_000.0) == 1_000.0
+    assert s.set_capital(100.0, wallet_equity=1_000.0, unrealized_pnl=5.0) == pytest.approx(100.0)
+    assert s.assigned_capital == 100.0 and s.kill_switch.peak_equity == pytest.approx(100.0)
+    s.realized_pnl += 20.0                                       # bot gains $20 after the change
+    assert s.sizing_equity(1_000.0, 5.0) == pytest.approx(120.0) # reinvested
+    assert s.sizing_equity(80.0, 5.0) == 80.0                    # capped at what really exists
+    assert s.set_capital(None, wallet_equity=1_000.0) == 1_000.0 and s.simulated_capital is None
+
+
+def test_lowering_capital_does_not_trip_the_kill_switch_but_keeps_a_trip():
+    s = BotState.new("testnet", LiveConfig(equity_override_usdt=1_000.0))
+    s.kill_switch.update(1_000.0)
+    s.set_capital(100.0, wallet_equity=5_000.0)
+    assert not s.kill_switch.update(s.sizing_equity(5_000.0))   # 1000 -> 100 is not a -90% loss
+    s.kill_switch.tripped = True
+    s.set_capital(500.0, wallet_equity=5_000.0)
+    assert s.kill_switch.tripped                                 # only RESET_KILL_SWITCH clears it
+
+
+def test_state_files_from_before_assigned_capital_still_load():
+    d = BotState.new("testnet", LiveConfig()).to_dict()
+    del d["assigned_capital"]
+    assert BotState.from_dict(d).assigned_capital is None

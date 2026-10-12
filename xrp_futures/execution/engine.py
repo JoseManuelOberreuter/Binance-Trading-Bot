@@ -361,7 +361,8 @@ class LiveEngine:
             ok, msg = self._apply_command(state, c, snap)
             results.append({**c, "ok": ok, "message": msg, "applied_at": datetime.now(timezone.utc).isoformat()})
             log.info("command %s %s -> %s", c["kind"], c.get("symbol") or "", msg)
-            self.events.emit(ev.COMMAND_APPLIED, command=c["kind"], symbol=c.get("symbol"), ok=ok)
+            self.events.emit(ev.COMMAND_APPLIED, command=c["kind"], symbol=c.get("symbol"), ok=ok,
+                             value=c.get("value"))
         self._save(state)
         self.commands.finish(results)
 
@@ -385,6 +386,16 @@ class LiveEngine:
                 return False, f"no bot position in {symbol}"
             self._close(state, symbol, reason="manual")
             return True, f"{symbol} closed at market (the bot may re-enter next candle; pause the coin to avoid it)"
+        if kind == cmdq.SET_CAPITAL:
+            value = c.get("value")
+            if value is not None and not float(value) > 0:
+                return False, f"invalid capital {value!r}"
+            amount = float(value) if value is not None else None
+            equity = state.set_capital(amount, snap.wallet_equity, self._unrealized(state, snap))
+            if amount is None:
+                return True, f"capital: whole futures wallet ({equity:.2f})"
+            note = f" (wallet only has {snap.wallet_equity:.2f}: using that)" if amount > snap.wallet_equity else ""
+            return True, f"capital set to {amount:.2f}{note}"
         if kind == cmdq.RESET_KILL_SWITCH:
             equity = state.sizing_equity(snap.wallet_equity, self._unrealized(state, snap))
             state.kill_switch.reset(equity)

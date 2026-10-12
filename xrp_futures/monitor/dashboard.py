@@ -76,6 +76,7 @@ LEVEL_CLASS = {"good": "good", "bad": "bad", "warn": "warn", "info": ""}
 LABELS = {
     cmdq.PAUSE_BOT: "Pausar bot", cmdq.RESUME_BOT: "Reanudar bot", cmdq.CLOSE_POSITION: "Cerrar",
     cmdq.PAUSE_SYMBOL: "Pausar", cmdq.RESUME_SYMBOL: "Reanudar", cmdq.RESET_KILL_SWITCH: "Reactivar kill-switch",
+    cmdq.SET_CAPITAL: "Cambiar capital",
 }
 SIGNAL_NAME = {1: "LONG (al alza)", -1: "SHORT (a la baja)", 0: "sin señal"}
 
@@ -104,8 +105,8 @@ def html_block(markup: str) -> None:
     st.markdown(markup, unsafe_allow_html=True)
 
 
-def submit(env: str, kind: str, symbol: str | None = None) -> None:
-    cmdq.CommandQueue(StateStore(env).dir).submit(kind, symbol)
+def submit(env: str, kind: str, symbol: str | None = None, value: float | None = None) -> None:
+    cmdq.CommandQueue(StateStore(env).dir).submit(kind, symbol, value=value)
     st.session_state["flash"] = (f"{LABELS[kind]}{' ' + msg.coin(symbol) if symbol else ''}: enviado. "
                                  "El bot lo aplica en su próximo ciclo (5 min como máximo).")
     st.rerun(scope="fragment")
@@ -182,7 +183,7 @@ def main_view(env: str) -> None:
         with tabs["Cuenta"]:
             account_tab(now)
     with tabs["Configuración"]:
-        config_tab(view, config)
+        config_tab(view, config, state, equity, env)
 
 
 # ------------------------------------------------------------------ Inicio ----
@@ -561,8 +562,37 @@ def account_tab(now: pd.Timestamp) -> None:
 
 
 # ----------------------------------------------------------- Configuración ----
-def config_tab(view, config) -> None:
-    cap = config.equity_override_usdt
+def capital_control(state, equity: float, env: str) -> None:
+    """How much of the account the bot uses. Applied by the bot at its next cycle."""
+    assigned = state.assigned_capital if state.assigned_capital is not None else (
+        state.simulated_capital if state.simulated_capital is not None else None)
+    now = (f"{msg.money(assigned)} asignados · hoy opera con <span class='num'>{msg.money(equity)}</span>"
+           if assigned is not None else f"Todo el saldo de Futures · hoy <span class='num'>{msg.money(equity)}</span>")
+    html_block(f"<p><strong>Capital del bot</strong><br><span class='muted'>{now}</span></p>")
+    if equity < 5:
+        html_block("<p class='warn'>Hay menos de $5 en USDT en Futures: el bot no puede abrir operaciones. "
+                   "Opera pares USDT, así que el saldo debe estar en USDT (no USDC).</p>")
+    pending = [c for c in cmdq.CommandQueue(StateStore(env).dir).pending() if c["kind"] == cmdq.SET_CAPITAL]
+    if pending:
+        v = pending[-1].get("value")
+        st.caption(f"Cambio enviado ({msg.money(v) if v is not None else 'todo el saldo'}); "
+                   "se aplica en el próximo ciclo.")
+        return
+    amount_col, apply_col, all_col = st.columns([2, 1, 1], vertical_alignment="bottom")
+    amount = amount_col.number_input("Monto en USDT", min_value=1.0, step=10.0, format="%.2f",
+                                     value=max(1.0, float(round(assigned if assigned is not None else equity, 2))),
+                                     key=f"capital_{env}")
+    if apply_col.button("Aplicar", type="primary", use_container_width=True, key=f"capital_apply_{env}"):
+        submit(env, cmdq.SET_CAPITAL, value=float(amount))
+    if all_col.button("Usar todo el saldo", use_container_width=True, key=f"capital_all_{env}"):
+        submit(env, cmdq.SET_CAPITAL, value=None)
+    st.caption("El bot opera con este monto más lo que gane o pierda desde ahora, sin pasar del saldo real. "
+               "No mueve dinero: solo limita el tamaño de las operaciones.")
+    st.write("")
+
+
+def config_tab(view, config, state, equity: float, env: str) -> None:
+    capital_control(state, equity, env)
     rows = [
         ("Monedas", ", ".join(msg.coin(s) for s in config.universe)),
         ("Señal", f"Ruptura de {config.strategy.donchian_window} velas de {config.strategy.timeframe} (Donchian)"),
@@ -571,7 +601,6 @@ def config_tab(view, config) -> None:
         ("Riesgo por operación", f"{config.risk_pct:.1%} del capital"),
         ("Apalancamiento", f"{config.leverage}x, margen aislado"),
         ("Kill-switch", f"−{config.kill_switch_drawdown:.0%} desde el máximo"),
-        ("Capital", f"{msg.money(cap)} simulados, más lo que gane o pierda el bot" if cap else "Saldo real de Futures"),
     ]
     html_block("<table class='kv'>" + "".join(f"<tr><th style='width:34%'>{k}</th><td>{esc(v)}</td></tr>"
                                               for k, v in rows) + "</table>")

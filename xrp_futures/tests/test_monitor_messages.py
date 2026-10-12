@@ -113,3 +113,12 @@ def test_status_summary():
     quiet = _render(ev.STATUS, equity=250, unrealized_pnl=0, open_positions=0, market_total=0,
                     bot_paused=True, kill_switch=False)
     assert quiet.plain() == "Sigo activo, en pausa: no abro operaciones nuevas. Sin posiciones abiertas. Capital 250.00."
+
+
+def test_set_capital_message():
+    from datetime import timezone
+    from xrp_futures.execution import commands as cmdq
+    from xrp_futures.monitor import messages as m
+    e = {"time": "2026-10-11T12:00:00+00:00", "type": "COMMAND_APPLIED", "command": cmdq.SET_CAPITAL, "ok": True}
+    assert "100.00" in m.render({**e, "value": 100.0}, timezone.utc).text
+    assert "todo el saldo" in m.render({**e, "value": None}, timezone.utc).text

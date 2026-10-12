@@ -48,7 +48,11 @@ class Position:
 class BotState:
     environment: str
     kill_switch: KillSwitch
+    # Capital the bot may use (user-chosen 2026-10-11): sizing equity = simulated_capital +
+    # realized + unrealized bot PnL, capped at the real wallet. None = the whole futures wallet.
+    # SET_CAPITAL rebases it so the bot's equity equals the new amount at that moment.
     simulated_capital: float | None = None     # LiveConfig.equity_override_usdt at first start
+    assigned_capital: float | None = None      # last amount the user assigned (display only)
     realized_pnl: float = 0.0                  # net of fees/funding, since first start
     positions: dict[str, Position] = field(default_factory=dict)
     paused: dict[str, str] = field(default_factory=dict)   # symbol -> reason (needs manual review)
@@ -64,17 +68,31 @@ class BotState:
     @classmethod
     def new(cls, environment: str, config: LiveConfig) -> "BotState":
         return cls(environment=environment, kill_switch=KillSwitch(config.kill_switch_drawdown),
-                   simulated_capital=config.equity_override_usdt, bot_paused=config.start_paused)
+                   simulated_capital=config.equity_override_usdt, assigned_capital=config.equity_override_usdt,
+                   bot_paused=config.start_paused)
 
     def sizing_equity(self, wallet_equity: float, unrealized_pnl: float = 0.0) -> float:
         """
-        Equity used for sizing and the kill-switch. Simulated mode: the simulated
-        capital + what the bot has made/lost so far (realized + open), so it evolves
-        like a real account of that size. Otherwise the real futures wallet equity.
+        Equity used for sizing and the kill-switch. With an assigned capital: that capital
+        + what the bot has made/lost since (realized + open), so gains are reinvested — but
+        never more than the real futures wallet. Otherwise the whole wallet equity.
         """
         if self.simulated_capital is not None:
-            return self.simulated_capital + self.realized_pnl + unrealized_pnl
+            return min(self.simulated_capital + self.realized_pnl + unrealized_pnl, wallet_equity)
         return wallet_equity
+
+    def set_capital(self, amount: float | None, wallet_equity: float, unrealized_pnl: float = 0.0) -> float:
+        """Assign `amount` USDT to the bot from now on (None = whole wallet). Rebases so the
+        bot's equity is `amount` right now, and moves the kill-switch peak to it so a lower
+        allocation isn't mistaken for a loss (an already-tripped switch stays tripped)."""
+        if amount is None:
+            self.simulated_capital = None
+        else:
+            self.simulated_capital = amount - self.realized_pnl - unrealized_pnl
+        self.assigned_capital = amount
+        equity = self.sizing_equity(wallet_equity, unrealized_pnl)
+        self.kill_switch.peak_equity = equity
+        return equity
 
     def open_notional(self, prices: dict[str, float]) -> float:
         return sum(float(Decimal(p.qty)) * prices[s] for s, p in self.positions.items() if s in prices)
