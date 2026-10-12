@@ -9,3 +9,5 @@ logs/
 trades.xml
 xrp_futures/data/cache/*.parquet
 xrp_futures/backtest/results/
+# xrp_futures live bot runtime state (per environment)
+xrp_futures/live_state/

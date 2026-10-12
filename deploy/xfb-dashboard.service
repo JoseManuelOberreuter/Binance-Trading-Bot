@@ -1,0 +1,16 @@
+[Unit]
+Description=xrp_futures dashboard (Streamlit, localhost only; exposed privately via Tailscale)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/xfb
+# Bound to 127.0.0.1: never reachable from the internet. `tailscale serve` publishes it
+# only inside the owner's private tailnet.
+ExecStart=/opt/xfb/.venv/bin/streamlit run xrp_futures/monitor/dashboard.py --server.address 127.0.0.1 --server.port 8501 --server.headless true
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

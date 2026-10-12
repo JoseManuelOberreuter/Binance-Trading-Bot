@@ -13,7 +13,7 @@ class CostModel:
     slippage_pct is added on top of the fee at every fill, in the adverse direction.
     """
 
-    taker_fee_pct: float = 0.0004   # Binance USDT-M base taker fee (VIP0, no BNB discount)
+    taker_fee_pct: float = 0.0005   # Binance USDT-M base taker fee (VIP0, no BNB discount)
     slippage_pct: float = 0.0005    # "Base" scenario per §22 (0 / 0.05% / 0.10% options)
     funding_enabled: bool = True
 
@@ -31,9 +31,9 @@ class CostModel:
         return price + adj if buying else price - adj
 
 
-OPTIMISTIC = CostModel(taker_fee_pct=0.0004, slippage_pct=0.0, funding_enabled=True)
-BASE = CostModel(taker_fee_pct=0.0004, slippage_pct=0.0005, funding_enabled=True)
-PESSIMISTIC = CostModel(taker_fee_pct=0.0004, slippage_pct=0.0010, funding_enabled=True)
+OPTIMISTIC = CostModel(taker_fee_pct=0.0005, slippage_pct=0.0, funding_enabled=True)
+BASE = CostModel(taker_fee_pct=0.0005, slippage_pct=0.0005, funding_enabled=True)
+PESSIMISTIC = CostModel(taker_fee_pct=0.0005, slippage_pct=0.0010, funding_enabled=True)
 
 
 def funding_pnl(position_side: int, position_notional: float, funding_rate: float) -> float:
