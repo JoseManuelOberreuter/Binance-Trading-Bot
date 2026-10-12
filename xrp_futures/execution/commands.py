@@ -25,9 +25,11 @@ PAUSE_SYMBOL = "PAUSE_SYMBOL"
 RESUME_SYMBOL = "RESUME_SYMBOL"
 RESET_KILL_SWITCH = "RESET_KILL_SWITCH"
 SET_CAPITAL = "SET_CAPITAL"      # value: USDT the bot may use (None = the whole futures wallet)
+SET_RISK = "SET_RISK"            # value: risk per trade as a fraction (e.g. 0.01), None = config default
+RISK_LIMITS = (0.001, 0.02)      # 0.1%..2%: above 2% the backtest got worse on every measure
 
 NEEDS_SYMBOL = {CLOSE_POSITION, PAUSE_SYMBOL, RESUME_SYMBOL}
-ALL = {PAUSE_BOT, RESUME_BOT, CLOSE_POSITION, PAUSE_SYMBOL, RESUME_SYMBOL, RESET_KILL_SWITCH, SET_CAPITAL}
+ALL = {PAUSE_BOT, RESUME_BOT, CLOSE_POSITION, PAUSE_SYMBOL, RESUME_SYMBOL, RESET_KILL_SWITCH, SET_CAPITAL, SET_RISK}
 
 
 class CommandQueue:
@@ -45,9 +47,11 @@ class CommandQueue:
             raise ValueError(f"{kind} needs a symbol")
         if kind == SET_CAPITAL and value is not None and not value > 0:
             raise ValueError("capital must be positive (or None for the whole wallet)")
+        if kind == SET_RISK and value is not None and not RISK_LIMITS[0] <= value <= RISK_LIMITS[1]:
+            raise ValueError(f"risk must be between {RISK_LIMITS[0]:.1%} and {RISK_LIMITS[1]:.1%}")
         cmd = {"id": uuid.uuid4().hex[:12], "kind": kind, "symbol": symbol, "source": source,
                "submitted_at": datetime.now(timezone.utc).isoformat()}
-        if kind == SET_CAPITAL:
+        if kind in (SET_CAPITAL, SET_RISK):
             cmd["value"] = value
         self.dir.mkdir(parents=True, exist_ok=True)
         with open(self.inbox, "a", encoding="utf-8") as f:

@@ -181,6 +181,10 @@ def render(e: dict, tz: tzinfo) -> Message:
         if not e.get("ok", True):
             return Message(t, f"No se pudo aplicar tu comando ({e.get('command')} {coin(e.get('symbol'))}).",
                            level="warn")
+        if e.get("command") == cmdq.SET_RISK:
+            v = e.get("value")
+            return Message(t, f"Riesgo por operación: {v:.1%} del capital. Aplica a las próximas entradas."
+                           if v is not None else "Riesgo por operación: el valor por defecto.")
         if e.get("command") == cmdq.SET_CAPITAL:
             v = e.get("value")
             return Message(t, f"Capital del bot: {money(v)} más lo que gane o pierda desde ahora." if v is not None

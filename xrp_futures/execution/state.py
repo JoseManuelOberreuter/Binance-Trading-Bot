@@ -53,6 +53,7 @@ class BotState:
     # SET_CAPITAL rebases it so the bot's equity equals the new amount at that moment.
     simulated_capital: float | None = None     # LiveConfig.equity_override_usdt at first start
     assigned_capital: float | None = None      # last amount the user assigned (display only)
+    risk_pct: float | None = None              # user override of LiveConfig.risk_pct (None = config)
     realized_pnl: float = 0.0                  # net of fees/funding, since first start
     positions: dict[str, Position] = field(default_factory=dict)
     paused: dict[str, str] = field(default_factory=dict)   # symbol -> reason (needs manual review)
@@ -94,6 +95,9 @@ class BotState:
         equity = self.sizing_equity(wallet_equity, unrealized_pnl)
         self.kill_switch.peak_equity = equity
         return equity
+
+    def effective_risk(self, config: LiveConfig) -> float:
+        return self.risk_pct if self.risk_pct is not None else config.risk_pct
 
     def open_notional(self, prices: dict[str, float]) -> float:
         return sum(float(Decimal(p.qty)) * prices[s] for s, p in self.positions.items() if s in prices)

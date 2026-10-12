@@ -76,8 +76,18 @@ LEVEL_CLASS = {"good": "good", "bad": "bad", "warn": "warn", "info": ""}
 LABELS = {
     cmdq.PAUSE_BOT: "Pausar bot", cmdq.RESUME_BOT: "Reanudar bot", cmdq.CLOSE_POSITION: "Cerrar",
     cmdq.PAUSE_SYMBOL: "Pausar", cmdq.RESUME_SYMBOL: "Reanudar", cmdq.RESET_KILL_SWITCH: "Reactivar kill-switch",
-    cmdq.SET_CAPITAL: "Cambiar capital",
+    cmdq.SET_CAPITAL: "Cambiar capital", cmdq.SET_RISK: "Cambiar riesgo",
 }
+
+# Backtest reference for the risk control ($1,000, 8 coins, 2020-2026, fees + funding, mark-to-market).
+RISK_REFERENCE = [  # (risk, median year, worst year, worst drawdown, $1,000 ->)
+    (0.006, "+16%", "−11%", "−37%", "$4,609"),
+    (0.010, "+22%", "−21%", "−53%", "$8,706"),
+    (0.015, "+25%", "−34%", "−67%", "$14,041"),
+    (0.020, "+25%", "−46%", "−78%", "$16,872"),
+]
+SIGNAL_NAME = {1: "LONG (al alza)", -1: "SHORT (a la baja)", 0: "sin señal"}
+
 SIGNAL_NAME = {1: "LONG (al alza)", -1: "SHORT (a la baja)", 0: "sin señal"}
 
 
@@ -612,6 +622,35 @@ def account_tab(now: pd.Timestamp) -> None:
 
 
 # ----------------------------------------------------------- Configuración ----
+def risk_control(state, config, env: str) -> None:
+    """Risk per trade (0.1%..2%). Applies to new entries; open positions keep their size."""
+    current = state.effective_risk(config)
+    html_block(f"<p><strong>Riesgo por operación</strong><br><span class='muted'>Hoy {current:.1%} del capital "
+               f"por operación{' (valor por defecto)' if state.risk_pct is None else ''}</span></p>")
+    pending = [c for c in cmdq.CommandQueue(StateStore(env).dir).pending() if c["kind"] == cmdq.SET_RISK]
+    if pending:
+        v = pending[-1].get("value")
+        st.caption(f"Cambio enviado ({v:.1%}); se aplica en el próximo ciclo." if v is not None
+                   else "Cambio enviado (valor por defecto); se aplica en el próximo ciclo.")
+        return
+    lo, hi = cmdq.RISK_LIMITS
+    value_col, apply_col, default_col = st.columns([2, 1, 1], vertical_alignment="bottom")
+    pct = value_col.number_input("Riesgo en %", min_value=lo * 100, max_value=hi * 100, step=0.1, format="%.1f",
+                                 value=round(current * 100, 1), key=f"risk_{env}")
+    if apply_col.button("Aplicar", type="primary", use_container_width=True, key=f"risk_apply_{env}"):
+        submit(env, cmdq.SET_RISK, value=round(pct / 100, 4))
+    if default_col.button(f"Volver a {config.risk_pct:.1%}", use_container_width=True, key=f"risk_default_{env}"):
+        submit(env, cmdq.SET_RISK, value=None)
+    rows = "".join(f"<tr><td class='num'>{r:.1%}</td><td class='num'>{m}</td><td class='num'>{w}</td>"
+                   f"<td class='num'>{d}</td><td class='num'>{f}</td></tr>" for r, m, w, d, f in RISK_REFERENCE)
+    with st.expander("Qué pasó históricamente con cada nivel de riesgo"):
+        html_block("<table class='kv'><tr><th>Riesgo</th><th>Año típico</th><th>Peor año</th><th>Peor caída</th>"
+                   f"<th>$1,000 en ~7 años</th></tr>{rows}</table>")
+        st.caption("Backtest 2020–2026 con $1,000 y 8 monedas, con comisiones y funding. Más riesgo agranda tanto "
+                   "las ganancias como las caídas; el kill-switch frena nuevas entradas en −30%. No es una promesa.")
+    st.write("")
+
+
 def capital_control(state, equity: float, env: str) -> None:
     """How much of the account the bot uses. Applied by the bot at its next cycle."""
     assigned = state.assigned_capital if state.assigned_capital is not None else (
@@ -643,12 +682,13 @@ def capital_control(state, equity: float, env: str) -> None:
 
 def config_tab(view, config, state, equity: float, env: str) -> None:
     capital_control(state, equity, env)
+    risk_control(state, config, env)
     rows = [
         ("Monedas", ", ".join(msg.coin(s) for s in config.universe)),
         ("Señal", f"Ruptura de {config.strategy.donchian_window} velas de {config.strategy.timeframe} (Donchian)"),
         ("Stop", f"{config.initial_stop_atr_multiplier:g}×ATR inicial, luego trailing Chandelier "
                  f"({config.chandelier_window} velas, {config.chandelier_multiplier:g}×ATR)"),
-        ("Riesgo por operación", f"{config.risk_pct:.1%} del capital"),
+        ("Riesgo por operación", f"{state.effective_risk(config):.1%} del capital"),
         ("Apalancamiento", f"{config.leverage}x, margen aislado"),
         ("Kill-switch", f"−{config.kill_switch_drawdown:.0%} desde el máximo"),
     ]
@@ -661,7 +701,7 @@ Cada minuto el bot comprueba que lo que cree tener coincida con Binance y aplica
 
 Al cerrar cada vela de {config.strategy.timeframe} (00:00 y 12:00 UTC), revisa cada moneda: si la señal cambió,
 cierra; si sigue, sube el stop (nunca lo afloja); si no hay posición y hay señal, entra arriesgando
-{config.risk_pct:.1%} del capital.
+{state.effective_risk(config):.1%} del capital.
 
 Los stops viven en Binance, así que protegen las posiciones aunque el bot o el PC se apaguen. Si una orden
 queda bajo el mínimo de Binance, se omite en vez de agrandar el riesgo.

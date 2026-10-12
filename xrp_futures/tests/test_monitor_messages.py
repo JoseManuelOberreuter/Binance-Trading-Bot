@@ -122,3 +122,12 @@ def test_set_capital_message():
     e = {"time": "2026-10-11T12:00:00+00:00", "type": "COMMAND_APPLIED", "command": cmdq.SET_CAPITAL, "ok": True}
     assert "100.00" in m.render({**e, "value": 100.0}, timezone.utc).text
     assert "todo el saldo" in m.render({**e, "value": None}, timezone.utc).text
+
+
+def test_set_risk_message():
+    from datetime import timezone
+    from xrp_futures.execution import commands as cmdq
+    from xrp_futures.monitor import messages as m
+    e = {"time": "2026-10-11T12:00:00+00:00", "type": "COMMAND_APPLIED", "command": cmdq.SET_RISK, "ok": True}
+    assert "1.5%" in m.render({**e, "value": 0.015}, timezone.utc).text
+    assert "por defecto" in m.render({**e, "value": None}, timezone.utc).text

@@ -451,3 +451,29 @@ def test_one_minute_cycles_keep_equity_log_at_five_minutes(tmp_path):
 def test_default_cycle_is_one_minute():
     from xrp_futures.config.live import config_for
     assert config_for("testnet").cycle_seconds == config_for("production").cycle_seconds == 60
+
+
+def test_set_risk_command_resizes_next_entries(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(0, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    eng.cycle(T0)
+    cmdq.CommandQueue(StateStore("testnet", root=tmp_path).dir).submit(cmdq.SET_RISK, value=0.006)
+    t1 = T0 + pd.Timedelta("12h")
+    sig["sig"] = _signal(1, last_closed_bar_open(t1))
+    state = eng.cycle(t1)
+    assert state.risk_pct == 0.006
+    assert state.positions[SYM].qty == "100.0"          # double the 0.3% case (50 XRP)
+
+
+def test_set_risk_back_to_default_and_limits(tmp_path):
+    q = cmdq.CommandQueue(tmp_path)
+    for bad in (0.0, 0.0005, 0.021, 0.05):
+        with pytest.raises(ValueError):
+            q.submit(cmdq.SET_RISK, value=bad)
+    ex, sig = FakeExchange(), {"sig": _signal(0, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    store = StateStore("testnet", root=tmp_path)
+    cmdq.CommandQueue(store.dir).submit(cmdq.SET_RISK, value=0.015)
+    assert eng.cycle(T0).effective_risk(CONFIG) == 0.015
+    cmdq.CommandQueue(store.dir).submit(cmdq.SET_RISK, value=None)
+    assert eng.cycle(T0 + pd.Timedelta(minutes=1)).effective_risk(CONFIG) == CONFIG.risk_pct

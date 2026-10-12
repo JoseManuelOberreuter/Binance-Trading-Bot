@@ -28,6 +28,7 @@ Fatal-error review (2026-10-11, docs decisions 38-42):
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Callable
@@ -170,8 +171,9 @@ class LiveEngine:
         price = self.exchange.mark_price(symbol)
         prices = {s: self.exchange.mark_price(s) for s in state.positions}
         equity = state.sizing_equity(snap.wallet_equity, self._unrealized(state, snap))
+        config = replace(self.config, risk_pct=state.effective_risk(self.config))   # user may override risk
         plan = plan_entry(symbol, sig.signal, equity, price, sig.atr, self.filters[symbol],
-                          state.open_notional(prices), self.config, state.kill_switch.tripped)
+                          state.open_notional(prices), config, state.kill_switch.tripped)
         if isinstance(plan, Skip):
             log.info("%s: entry skipped (%s) %s", symbol, plan.reason, plan.detail)
             self._count("skipped")
@@ -396,6 +398,13 @@ class LiveEngine:
                 return True, f"capital: whole futures wallet ({equity:.2f})"
             note = f" (wallet only has {snap.wallet_equity:.2f}: using that)" if amount > snap.wallet_equity else ""
             return True, f"capital set to {amount:.2f}{note}"
+        if kind == cmdq.SET_RISK:
+            value = c.get("value")
+            lo, hi = cmdq.RISK_LIMITS
+            if value is not None and not lo <= float(value) <= hi:
+                return False, f"risk {value!r} outside {lo:.1%}..{hi:.1%}"
+            state.risk_pct = float(value) if value is not None else None
+            return True, f"risk per trade {state.effective_risk(self.config):.2%} (applies to new entries)"
         if kind == cmdq.RESET_KILL_SWITCH:
             equity = state.sizing_equity(snap.wallet_equity, self._unrealized(state, snap))
             state.kill_switch.reset(equity)
