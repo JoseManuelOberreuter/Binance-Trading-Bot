@@ -124,7 +124,7 @@ def equity_every(equity: pd.DataFrame, rule: str) -> pd.DataFrame:
     return pd.concat([df.iloc[[0]], last_per_bucket]).drop_duplicates().reset_index(drop=True)
 
 
-MIN_BUCKETS = {"4h": 6, "1D": 7}   # show at least 1 day of 4h buckets / 1 week of days
+MIN_BUCKETS = {"1h": 6, "4h": 6, "1D": 7}   # at least 6 hours / 1 day of 4h buckets / 1 week of days
 MAX_TICKS = 12
 
 
@@ -196,7 +196,10 @@ def per_coin(state: BotState, trades: pd.DataFrame, marks: dict[str, dict], univ
 
 # ------------------------------------------------------------- capital chart ----
 CHART_GAP = pd.Timedelta(minutes=30)       # snapshots come every 5 min; a longer gap = bot was off
-CHART_RANGES = {"7 días": pd.Timedelta(days=7), "30 días": pd.Timedelta(days=30), "Todo": None}
+CHART_RANGES = {"24 horas": pd.Timedelta(days=1), "7 días": pd.Timedelta(days=7),
+                "30 días": pd.Timedelta(days=30), "Todo": None}
+CHART_STEPS = {"1 hora": "1h", "4 horas": "4h", "1 día": "1D"}
+DEFAULT_STEP = {"24 horas": "1 hora", "7 días": "4 horas", "30 días": "1 día", "Todo": "1 día"}
 
 
 def chart_points(curve: pd.DataFrame, baseline: float, rule: str, window: pd.Timedelta | None,
@@ -220,6 +223,8 @@ def chart_points(curve: pd.DataFrame, baseline: float, rule: str, window: pd.Tim
     parts = [equity_every(g, rule) for _, g in df.groupby("segment", sort=True)]
     out = pd.concat(parts).drop_duplicates().reset_index(drop=True)
     out["pct"] = out["equity"] / baseline - 1 if baseline else 0.0
+    out["change"] = out["equity"].diff().fillna(0.0)                 # gained/lost since the previous point
+    out["change_pct"] = (out["equity"] / out["equity"].shift(1) - 1).fillna(0.0)
     return out
 
 

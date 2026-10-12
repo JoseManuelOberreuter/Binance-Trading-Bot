@@ -156,3 +156,14 @@ def test_trade_marks_place_entries_and_exits_on_the_curve():
     assert exits.loc["XRPUSDT", "result"] == "good" and exits.loc["ADAUSDT", "result"] == "bad"
     assert exits.loc["ADAUSDT", "equity"] == 98.0                            # sits on the curve
     assert data.trade_marks(pd.DataFrame(), {}, curve, "UTC").empty
+
+
+def test_chart_points_hourly_last_24h_with_change_per_interval():
+    times = pd.date_range("2026-10-11 00:00", "2026-10-12 12:00", freq="5min")
+    values = [100.0 + 0.01 * i for i in range(len(times))]               # +0.12 per hour
+    pts = data.chart_points(_curve(times, values), 100.0, data.CHART_STEPS["1 hora"],
+                            data.CHART_RANGES["24 horas"], pd.Timestamp("2026-10-12 12:00"))
+    assert pts["time"].min() >= pd.Timestamp("2026-10-11 12:00")
+    assert 24 <= len(pts) <= 26                                          # one point per hour
+    assert pts["change"].iloc[-2] == pytest.approx(0.12, abs=0.011)      # last complete hour (last = hour in progress)
+    assert data.DEFAULT_STEP["24 horas"] == "1 hora"
