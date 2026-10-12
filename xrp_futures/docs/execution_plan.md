@@ -349,6 +349,22 @@ Conocido y aceptado: con el PC suspendido o con
 cambio de IP pública el bot queda ciego (los stops siguen en Binance); los retiros de
 Futures cuentan como caída para el kill-switch.
 
+## Ajustes desde el dashboard (12-oct-2026, decisiones del usuario)
+
+44. **Capital configurable** (comando `SET_CAPITAL`, pestaña Configuración de cada bot):
+    el bot opera con el monto asignado más lo que gane o pierda desde ese momento
+    (reinvierte), nunca más que el saldo real. Bajar el monto no activa el kill-switch.
+    "Desde el inicio" y el gráfico miden solo el resultado del bot: depósitos y
+    conversiones no cuentan como ganancia.
+45. **Ciclos de 1 minuto** (`LiveConfig.cycle_seconds = 60`, antes 5 min): los controles se
+    aplican en ≤ 1 min. El registro de capital sigue cada 5 min para no crecer de más; el
+    panel marca "Detenido" tras 4 min sin ciclos. La estrategia sigue decidiendo solo al
+    cierre de cada vela de 12 h.
+46. **Riesgo por operación ajustable** (comando `SET_RISK`): entre 0.1% y 2%, solo para
+    entradas nuevas. Tope en 2% porque en el backtest de $1,000 y 8 monedas todo empeoró
+    sobre ese nivel (con 3%: año típico +16% y peor caída −90%). El control muestra esa
+    tabla como referencia.
+
 ## Archivos
 
 ```
