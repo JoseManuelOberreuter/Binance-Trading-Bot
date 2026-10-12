@@ -101,12 +101,58 @@ def test_per_coin_cumulative_result():
     assert data.per_coin(state, pd.DataFrame(), {}, ["BTCUSDT"])["BTCUSDT"]["total"] == 0.0
 
 
-def test_starting_capital_simulated_or_first_snapshot():
+def test_starting_capital_ignores_deposits_and_conversions():
     import pandas as pd
     from xrp_futures.config.live import config_for
     from xrp_futures.execution.state import BotState
-    from xrp_futures.monitor.data import starting_capital
-    eq = pd.DataFrame({"equity": [80.5, 82.0]})
-    assert starting_capital(BotState.new("testnet", config_for("testnet")), eq) == 250.0
-    assert starting_capital(BotState.new("production", config_for("production")), eq) == 80.5
-    assert starting_capital(BotState.new("production", config_for("production")), eq.iloc[:0]) is None
+    from xrp_futures.monitor.data import performance_curve, starting_capital
+    prod = BotState.new("production", config_for("production"))
+    # first cycle saw $0.24, then the user converted $80 USDC -> USDT: not a gain
+    assert starting_capital(prod, equity_now=80.92, unrealized=0.0) == pytest.approx(80.92)
+    prod.realized_pnl = 4.0                                   # the bot then makes $4 (+1 open)
+    assert starting_capital(prod, equity_now=85.92, unrealized=1.0) == pytest.approx(80.92)
+    test = BotState.new("testnet", config_for("testnet"))     # simulated $250: unchanged behavior
+    test.realized_pnl = -1.08
+    assert starting_capital(test, test.sizing_equity(5_000.0), 0.0) == pytest.approx(250.0)
+
+    log = pd.DataFrame({"time": pd.to_datetime(["2026-10-12 00:48", "2026-10-12 01:31", "2026-10-13 00:00"], utc=True),
+                        "equity": [0.24, 80.92, 85.92], "realized_pnl": [0.0, 0.0, 4.0], "unrealized_pnl": [0.0, 0.0, 1.0]})
+    curve = performance_curve(log, baseline=80.92)
+    assert list(curve["equity"]) == pytest.approx([80.92, 80.92, 85.92])   # no jump from the deposit
+
+
+# ---- capital chart -------------------------------------------------------------------
+def _curve(times, values):
+    return pd.DataFrame({"time": pd.to_datetime(times), "equity": values})
+
+
+def test_chart_points_break_line_when_bot_was_off():
+    times = ["2026-10-01 10:00", "2026-10-01 10:05", "2026-10-01 10:10",    # running
+             "2026-10-05 09:00", "2026-10-05 09:05"]                        # back after 4 days off
+    pts = data.chart_points(_curve(times, [100, 101, 99, 102, 103]), 100.0, "4h", None,
+                            pd.Timestamp("2026-10-05 10:00"))
+    assert pts["segment"].nunique() == 2
+    assert pts["pct"].iloc[-1] == pytest.approx(0.03)
+
+
+def test_chart_points_drawdown_from_full_history_and_range_filter():
+    times = pd.date_range("2026-09-01", periods=40, freq="D")
+    values = [100 + i for i in range(30)] + [129 * 0.9] * 10                # peak 129, then -10%
+    pts = data.chart_points(_curve(times, values), 100.0, "1D", pd.Timedelta(days=7),
+                            pd.Timestamp("2026-10-10 12:00"))
+    assert pts["time"].min() >= pd.Timestamp("2026-10-03 12:00")             # last 7 days only
+    assert pts["drawdown"].iloc[-1] == pytest.approx(-0.10)                  # peak is older than the window
+
+
+def test_trade_marks_place_entries_and_exits_on_the_curve():
+    curve = _curve(["2026-10-01 00:00", "2026-10-02 00:00", "2026-10-03 00:00"], [100.0, 104.0, 98.0])
+    trades = pd.DataFrame({"symbol": ["XRPUSDT", "ADAUSDT"], "side": ["LONG", "SHORT"],
+                           "entry_time": pd.to_datetime(["2026-10-01 00:00", "2026-10-02 00:00"], utc=True),
+                           "exit_time": pd.to_datetime(["2026-10-02 00:00", "2026-10-03 00:00"], utc=True),
+                           "net_pnl": [4.0, -6.0]})
+    m = data.trade_marks(trades, {}, curve, "UTC")
+    assert (m["kind"] == "Entrada").sum() == 2 and (m["kind"] == "Salida").sum() == 2
+    exits = m[m["kind"] == "Salida"].set_index("symbol")
+    assert exits.loc["XRPUSDT", "result"] == "good" and exits.loc["ADAUSDT", "result"] == "bad"
+    assert exits.loc["ADAUSDT", "equity"] == 98.0                            # sits on the curve
+    assert data.trade_marks(pd.DataFrame(), {}, curve, "UTC").empty

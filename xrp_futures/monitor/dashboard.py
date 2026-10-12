@@ -165,7 +165,7 @@ def main_view(env: str) -> None:
     last = view.equity.iloc[-1] if not view.equity.empty else None
     equity = float(last["equity"]) if last is not None else (state.simulated_capital or 0.0)
     unrealized = float(last["unrealized_pnl"]) if last is not None and "unrealized_pnl" in last else 0.0
-    capital0 = data.starting_capital(state, view.equity) or equity
+    capital0 = data.starting_capital(state, equity, unrealized)
     marks = data.latest_marks(view)
     coins = data.per_coin(state, view.trades, marks, config.universe, capital0)
 
@@ -358,16 +358,24 @@ def capital_tab(view, state, equity: float, capital0: float, unrealized: float) 
     if len(view.equity) < 2:
         html_block("<p class='muted'>La curva aparece después de algunos ciclos del bot.</p>")
         return
-    step = st.segmented_control("Intervalo", ["4 horas", "1 día"], default="1 día",
-                                key="equity_step", label_visibility="collapsed") or "1 día"
+    range_col, step_col, _ = st.columns([3, 2, 3])
+    span = range_col.segmented_control("Rango", list(data.CHART_RANGES), default="30 días",
+                                       key="equity_range", label_visibility="collapsed") or "30 días"
+    step = step_col.segmented_control("Intervalo", ["4 horas", "1 día"], default="1 día",
+                                      key="equity_step", label_visibility="collapsed") or "1 día"
     rule = "4h" if step == "4 horas" else "1D"
-    local = view.equity[["time", "equity"]].copy()   # bucket by this PC's calendar, not UTC
-    local["time"] = local["time"].dt.tz_convert(TZ).dt.tz_localize(None)
-    points = data.equity_every(local, rule)
-    if len(points) > 1:
-        st.altair_chart(equity_chart(points, capital0, rule), use_container_width=True)
-    else:
-        html_block(f"<p class='muted'>Todavía hay un solo valor ({msg.money(float(points['equity'].iloc[-1]))}).</p>")
+    curve = data.performance_curve(view.equity, capital0)   # deposits/transfers removed
+    curve["time"] = curve["time"].dt.tz_convert(TZ).dt.tz_localize(None)   # bucket by this PC's calendar
+    now = pd.Timestamp.now(tz=TZ).tz_localize(None)
+    points = data.chart_points(curve, capital0, rule, data.CHART_RANGES[span], now)
+    if len(points) < 2:
+        html_block("<p class='muted'>Todavía no hay suficientes datos en este rango.</p>")
+        return
+    marks = data.trade_marks(view.trades, state.positions, curve, TZ)
+    marks = marks[marks["time"] >= points["time"].iloc[0]]
+    st.altair_chart(capital_chart(points, marks, capital0, rule), use_container_width=True)
+    if points["segment"].nunique() > 1:
+        st.caption("Los cortes en la línea son períodos en que el bot estuvo apagado.")
 
 
 def _vl_datetime(ts: pd.Timestamp) -> alt.DateTime:
@@ -375,31 +383,73 @@ def _vl_datetime(ts: pd.Timestamp) -> alt.DateTime:
     return alt.DateTime(year=ts.year, month=ts.month, date=ts.day, hours=ts.hour, minutes=ts.minute)
 
 
-def equity_chart(points: pd.DataFrame, baseline: float, rule: str) -> alt.Chart:
+def capital_chart(points: pd.DataFrame, marks: pd.DataFrame, baseline: float, rule: str) -> alt.VConcatChart:
     """
-    Equity curve that doesn't exaggerate: the y-range spans at least ±2% of the starting
-    capital (a -0.1% wiggle must not look like a crash), with a dashed baseline. `points`
-    are already local, tz-naive times; the x axis is aligned to the chosen interval
-    (4-hour or daily ticks) via data.time_axis.
+    Capital curve + drawdown strip. The curve doesn't exaggerate (y spans at least ±2% of
+    the starting capital); green area above the starting capital, red below; $ on the left
+    axis and the same scale in % on the right; the line breaks where the bot was off
+    (`segment`); entries (hollow) and exits (green win / red loss) are marked on the curve.
+    Times are local tz-naive; the x axis is aligned to the chosen interval (data.time_axis).
     """
     start, end, ticks = data.time_axis(points["time"].iloc[0], points["time"].iloc[-1], rule)
     label = "%d-%m %H:%M" if rule == "4h" else "%d-%m"
+    x = alt.X("time:T", title=None, scale=alt.Scale(domain=[_vl_datetime(start), _vl_datetime(end)]),
+              axis=alt.Axis(grid=False, labelColor=MUTED, domainColor=LINE, format=label, labelAngle=0,
+                            values=[_vl_datetime(t) for t in ticks]))
     lo = min(points["equity"].min(), baseline * 0.98)
     hi = max(points["equity"].max(), baseline * 1.02)
-    y = alt.Y("equity:Q", title=None, scale=alt.Scale(domain=[lo, hi], nice=False),
-              axis=alt.Axis(gridColor=LINE, labelColor=MUTED, domain=False, format=",.0f", tickCount=5))
-    line = alt.Chart(points).mark_line(color="#c9ced6", strokeWidth=1.5,
-                                       point=alt.OverlayMarkDef(color="#c9ced6", size=22)).encode(
-        x=alt.X("time:T", title=None,
-                scale=alt.Scale(domain=[_vl_datetime(start), _vl_datetime(end)]),
-                axis=alt.Axis(grid=False, labelColor=MUTED, domainColor=LINE, format=label, labelAngle=0,
-                              values=[_vl_datetime(t) for t in ticks])),
-        y=y,
+    pts = points.assign(base=baseline, up=points["equity"].clip(lower=baseline),
+                        down=points["equity"].clip(upper=baseline))
+    dollars = alt.Scale(domain=[lo, hi], nice=False)
+    span = hi - lo                           # small accounts need decimals or labels repeat (80, 80, 81…)
+    fmt = ",.0f" if span >= 20 else ",.1f" if span >= 2 else ",.2f"
+    y_axis = alt.Axis(gridColor=LINE, labelColor=MUTED, domain=False, format=fmt, tickCount=5)
+    chart = alt.Chart(pts)
+    gain = chart.mark_area(color=GOOD, opacity=0.18).encode(
+        x=x, y=alt.Y("base:Q", scale=dollars, title=None, axis=y_axis), y2="up:Q", detail="segment:N")
+    loss = chart.mark_area(color=BAD, opacity=0.18).encode(x=x, y=alt.Y("base:Q", scale=dollars), y2="down:Q",
+                                                           detail="segment:N")
+    tooltip = [alt.Tooltip("time:T", title="Hora", format="%d-%m %H:%M"),
+               alt.Tooltip("equity:Q", title="Capital", format=",.2f"),
+               alt.Tooltip("pct:Q", title="Resultado", format="+.2%"),
+               alt.Tooltip("drawdown:Q", title="Caída desde el máximo", format=".2%")]
+    line = chart.mark_line(color="#c9ced6", strokeWidth=1.5, point=alt.OverlayMarkDef(color="#c9ced6", size=18)
+                           ).encode(x=x, y=alt.Y("equity:Q", scale=dollars), detail="segment:N", tooltip=tooltip)
+    rule_line = alt.Chart(pd.DataFrame({"v": [baseline]})).mark_rule(
+        color=MUTED, strokeDash=[4, 4], strokeWidth=1).encode(y=alt.Y("v:Q", scale=dollars))
+    layers = [gain, loss, rule_line, line]
+    if not marks.empty:
+        mark_tooltip = [alt.Tooltip("time:T", title="Hora", format="%d-%m %H:%M"),
+                        alt.Tooltip("kind:N", title="Operación"), alt.Tooltip("symbol:N", title="Moneda"),
+                        alt.Tooltip("side:N", title="Lado"), alt.Tooltip("pnl:Q", title="Resultado", format="+,.2f")]
+        color = alt.Color("result:N", legend=None,
+                          scale=alt.Scale(domain=["good", "bad", "neutral"], range=[GOOD, BAD, MUTED]))
+        m = alt.Chart(marks)
+        layers += [
+            m.transform_filter("datum.kind == 'Entrada'").mark_point(shape="circle", filled=False, size=70,
+                                                                     strokeWidth=1.5, color=MUTED).encode(
+                x=x, y=alt.Y("equity:Q", scale=dollars), tooltip=mark_tooltip),
+            m.transform_filter("datum.kind == 'Salida'").mark_point(shape="circle", filled=True, size=70).encode(
+                x=x, y=alt.Y("equity:Q", scale=dollars), color=color, tooltip=mark_tooltip),
+        ]
+    # Right axis: the same scale expressed as % of the starting capital.
+    pct_axis = alt.Chart(pts).mark_line(opacity=0).encode(
+        x=x, y=alt.Y("pct:Q", title=None, scale=alt.Scale(domain=[lo / baseline - 1, hi / baseline - 1], nice=False),
+                     axis=alt.Axis(orient="right", labelColor=MUTED, domain=False, grid=False, format="+.0%",
+                                   tickCount=5)))
+    main = alt.layer(alt.layer(*layers), pct_axis).resolve_scale(y="independent").properties(height=260)
+
+    dd_floor = min(points["drawdown"].min(), -0.05)
+    dd_scale = alt.Scale(domain=[dd_floor, 0], nice=False)
+    dd = chart.mark_area(color=BAD, opacity=0.3, line={"color": BAD, "strokeWidth": 1}).encode(
+        x=x, y=alt.Y("drawdown:Q", scale=dd_scale, title=None,
+                     axis=alt.Axis(gridColor=LINE, labelColor=MUTED, domain=False, format=".0%", tickCount=3)),
+        detail="segment:N",
         tooltip=[alt.Tooltip("time:T", title="Hora", format="%d-%m %H:%M"),
-                 alt.Tooltip("equity:Q", title="Capital", format=",.2f")])
-    base = alt.Chart(pd.DataFrame({"equity": [baseline]})).mark_rule(
-        color=MUTED, strokeDash=[4, 4], strokeWidth=1).encode(y=y)
-    return (base + line).properties(height=260).configure_view(strokeWidth=0)
+                 alt.Tooltip("drawdown:Q", title="Caída desde el máximo", format=".2%")]).properties(
+        height=80, title=alt.TitleParams("Caída desde el máximo", color=MUTED, fontSize=11, fontWeight="normal",
+                                         anchor="start"))
+    return alt.vconcat(main, dd, spacing=14).resolve_scale(x="shared").configure_view(strokeWidth=0)
 
 
 # ---------------------------------------------------- Cuenta Binance (real) ----

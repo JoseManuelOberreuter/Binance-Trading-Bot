@@ -151,11 +151,26 @@ def latest_marks(view: BotView) -> dict[str, dict]:
     return marks.iloc[-1] if len(marks) and isinstance(marks.iloc[-1], dict) else {}
 
 
-def starting_capital(state: BotState, equity: pd.DataFrame) -> float | None:
-    """Simulated capital, or (real-money mode) the account equity at the bot's first cycle."""
-    if state.simulated_capital is not None:
-        return state.simulated_capital
-    return float(equity["equity"].iloc[0]) if not equity.empty else None
+def bot_pnl(state: BotState, unrealized: float) -> float:
+    """What the bot itself has made or lost: closed trades (net) + its open positions."""
+    return state.realized_pnl + unrealized
+
+
+def starting_capital(state: BotState, equity_now: float, unrealized: float) -> float:
+    """
+    Baseline for "desde el inicio": current equity minus the bot's own PnL. Deposits,
+    conversions, transfers and capital changes are therefore never counted as gains
+    (in real-money mode the first snapshot can be anything, e.g. $0.24 before funding).
+    """
+    return equity_now - bot_pnl(state, unrealized)
+
+
+def performance_curve(equity_log: pd.DataFrame, baseline: float) -> pd.DataFrame:
+    """Equity curve without external flows: baseline + the bot's PnL at each snapshot."""
+    out = equity_log[["time"]].copy()
+    unreal = equity_log["unrealized_pnl"] if "unrealized_pnl" in equity_log else 0.0
+    out["equity"] = baseline + equity_log["realized_pnl"].fillna(0.0) + pd.Series(unreal, index=out.index).fillna(0.0)
+    return out
 
 
 def per_coin(state: BotState, trades: pd.DataFrame, marks: dict[str, dict], universe,
@@ -177,3 +192,60 @@ def per_coin(state: BotState, trades: pd.DataFrame, marks: dict[str, dict], univ
         out[symbol] = dict(realized=realized, unrealized=unrealized, total=total, traded=traded,
                            n_trades=len(mine), pct=(total / capital0) if capital0 and traded else None)
     return out
+
+
+# ------------------------------------------------------------- capital chart ----
+CHART_GAP = pd.Timedelta(minutes=30)       # snapshots come every 5 min; a longer gap = bot was off
+CHART_RANGES = {"7 días": pd.Timedelta(days=7), "30 días": pd.Timedelta(days=30), "Todo": None}
+
+
+def chart_points(curve: pd.DataFrame, baseline: float, rule: str, window: pd.Timedelta | None,
+                 now: pd.Timestamp) -> pd.DataFrame:
+    """
+    Points for the capital chart from a performance curve (time, equity; local tz-naive):
+    drawdown from the running peak (computed on the full history, like the kill-switch),
+    result vs `baseline` in %, a `segment` id that changes wherever the bot was off for more
+    than CHART_GAP (the line breaks there instead of inventing a straight line), restricted
+    to the last `window` and thinned to one point per `rule` bucket within each segment.
+    """
+    if curve.empty:
+        return curve.assign(drawdown=[], pct=[], segment=[])
+    df = curve.sort_values("time").reset_index(drop=True)
+    df["drawdown"] = df["equity"] / df["equity"].cummax() - 1
+    df["segment"] = (df["time"].diff() > CHART_GAP).cumsum()
+    if window is not None:
+        df = df[df["time"] >= now - window]
+    if df.empty:
+        return df.assign(pct=[])
+    parts = [equity_every(g, rule) for _, g in df.groupby("segment", sort=True)]
+    out = pd.concat(parts).drop_duplicates().reset_index(drop=True)
+    out["pct"] = out["equity"] / baseline - 1 if baseline else 0.0
+    return out
+
+
+def trade_marks(trades: pd.DataFrame, open_positions: dict, curve: pd.DataFrame, tz) -> pd.DataFrame:
+    """
+    One mark per entry and per exit, placed on the curve at that moment (local tz-naive):
+    kind "Entrada"/"Salida", coin, side and, for exits, the trade's net result.
+    """
+    rows = []
+    if not trades.empty:
+        for _, t in trades.iterrows():
+            side = t.get("side", "")
+            if pd.notna(t.get("entry_time")):
+                rows.append(dict(time=t["entry_time"], kind="Entrada", symbol=t["symbol"], side=side, pnl=None))
+            if pd.notna(t.get("exit_time")):
+                pnl = t.get("net_pnl")
+                rows.append(dict(time=t["exit_time"], kind="Salida", symbol=t["symbol"], side=side,
+                                 pnl=float(pnl) if pnl is not None and pd.notna(pnl) else None))
+    for symbol, pos in open_positions.items():
+        rows.append(dict(time=pd.Timestamp(pos.entry_time), kind="Entrada", symbol=symbol,
+                         side="LONG" if pos.side == 1 else "SHORT", pnl=None))
+    if not rows or curve.empty:
+        return pd.DataFrame(columns=["time", "kind", "symbol", "side", "pnl", "equity", "result"])
+    marks = pd.DataFrame(rows)
+    marks["time"] = pd.to_datetime(marks["time"], utc=True).dt.tz_convert(tz).dt.tz_localize(None)
+    marks = pd.merge_asof(marks.sort_values("time"), curve[["time", "equity"]].sort_values("time"),
+                          on="time", direction="nearest")
+    marks["result"] = ["neutral" if p is None or pd.isna(p) else "good" if p > 0 else "bad" for p in marks["pnl"]]
+    return marks.reset_index(drop=True)
