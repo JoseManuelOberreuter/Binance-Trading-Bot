@@ -1,5 +1,5 @@
 """
-Live engine (Phase 4, docs/execution_plan.md): one `cycle()` per poll (~5 min).
+Live engine (Phase 4, docs/execution_plan.md): one `cycle()` per poll (LiveConfig.cycle_seconds, 1 min).
 
   1. snapshot Binance -> reconcile -> apply actions (Binance is the source of truth)
   2. apply dashboard commands (execution/commands.py)
@@ -417,7 +417,10 @@ class LiveEngine:
             self.events.emit(ev.KILL_SWITCH, equity=equity, drawdown=state.kill_switch.drawdown(equity))
         state.last_cycle_at = _iso(now)
         self._maybe_status(state, snap, now, equity)
-        if not self.dry_run:
+        logged = state.last_equity_log_at
+        due = logged is None or now - pd.Timestamp(logged) >= pd.Timedelta(minutes=self.config.equity_log_every_min)
+        if due and not self.dry_run:
+            state.last_equity_log_at = _iso(now)
             self.store.append_equity(dict(
                 time=_iso(now), equity=equity, wallet_equity=snap.wallet_equity, realized_pnl=state.realized_pnl,
                 unrealized_pnl=self._unrealized(state, snap), drawdown=state.kill_switch.drawdown(equity),

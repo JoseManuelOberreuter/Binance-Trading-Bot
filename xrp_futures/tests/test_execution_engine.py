@@ -437,3 +437,17 @@ def test_set_capital_validation():
     with _pytest.raises(ValueError):
         q.__new__(q).submit(cmdq.SET_CAPITAL, value=0)
 
+
+def test_one_minute_cycles_keep_equity_log_at_five_minutes(tmp_path):
+    ex, sig = FakeExchange(), {"sig": _signal(0, last_closed_bar_open(T0))}
+    eng = _engine(tmp_path, ex, sig)
+    for minute in range(11):                         # 11 one-minute cycles: 0..10
+        eng.cycle(T0 + pd.Timedelta(minutes=minute))
+    times = [r["time"] for r in eng.store.read_jsonl(eng.store.equity_path)]
+    assert len(times) == 3                           # minutes 0, 5 and 10
+    assert ex.clock_syncs == 11                      # but every cycle still runs
+
+
+def test_default_cycle_is_one_minute():
+    from xrp_futures.config.live import config_for
+    assert config_for("testnet").cycle_seconds == config_for("production").cycle_seconds == 60

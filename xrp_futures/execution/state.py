@@ -60,6 +60,7 @@ class BotState:
     bot_paused: bool = False                   # manual pause: no new entries (stops/exits keep working)
     last_cycle_at: str | None = None           # ISO UTC heartbeat, read by the dashboard
     last_status_at: str | None = None          # last periodic STATUS event (console summary)
+    last_equity_log_at: str | None = None      # last equity_log.jsonl snapshot (throttled)
     last_signals: dict[str, int] = field(default_factory=dict)   # per symbol, from the last processed candle
     # Entry orders sent whose outcome isn't confirmed yet (response lost): symbol -> client_id,
     # side, atr, equity, created. Resolved at the start of the next cycle (engine._resolve_pending).

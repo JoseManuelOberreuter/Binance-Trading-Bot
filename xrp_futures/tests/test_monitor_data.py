@@ -42,8 +42,8 @@ def test_load_reads_everything_the_bot_writes(tmp_path):
 def test_heartbeat():
     state = BotState.new("testnet", CONFIG)
     state.last_cycle_at = "2026-09-24T18:00:00+00:00"
-    assert data.heartbeat_status(state, pd.Timestamp("2026-09-24T18:06:00+00:00")) == (True, "último ciclo hace 6 min")
-    assert data.heartbeat_status(state, pd.Timestamp("2026-09-24T18:30:00+00:00"))[0] is False
+    assert data.heartbeat_status(state, pd.Timestamp("2026-09-24T18:03:00+00:00")) == (True, "último ciclo hace 3 min")
+    assert data.heartbeat_status(state, pd.Timestamp("2026-09-24T18:06:00+00:00"))[0] is False   # 1-min cycles
 
 
 def test_trade_summary_ignores_unknown_pnl():

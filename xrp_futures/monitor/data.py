@@ -17,7 +17,7 @@ from xrp_futures.execution.commands import CommandQueue
 from xrp_futures.execution.events import CANDLE_PROCESSED, EventLog
 from xrp_futures.execution.state import STATE_ROOT, BotState, StateStore
 
-HEARTBEAT_STALE_AFTER = pd.Timedelta(minutes=12)   # bot polls every 5 min; >2 missed cycles = stale
+HEARTBEAT_STALE_AFTER = pd.Timedelta(minutes=4)    # bot polls every minute; >3 missed cycles = stale
 
 
 @dataclass

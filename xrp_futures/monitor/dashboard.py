@@ -10,7 +10,7 @@ Editorial, near-monochrome, no emojis; color only on gains/losses/warnings.
 
 Two separate pages, never mixed: "Bot" reads only the files the bot writes under
 live_state/<env>/ (no API keys, never talks to Binance — controls go through the command
-inbox and the bot applies them at its next cycle, <= 5 min). "Cuenta Binance" shows the
+inbox and the bot applies them at its next cycle, <= 1 min). "Cuenta Binance" shows the
 user's REAL account read-only via monitor/account.py (production key from .env).
 """
 
@@ -108,7 +108,7 @@ def html_block(markup: str) -> None:
 def submit(env: str, kind: str, symbol: str | None = None, value: float | None = None) -> None:
     cmdq.CommandQueue(StateStore(env).dir).submit(kind, symbol, value=value)
     st.session_state["flash"] = (f"{LABELS[kind]}{' ' + msg.coin(symbol) if symbol else ''}: enviado. "
-                                 "El bot lo aplica en su próximo ciclo (5 min como máximo).")
+                                 "El bot lo aplica en su próximo ciclo (1 min como máximo).")
     st.rerun(scope="fragment")
 
 
@@ -607,7 +607,7 @@ def config_tab(view, config, state, equity: float, env: str) -> None:
     st.write("")
     with st.expander("Cómo funciona"):
         st.markdown(f"""
-Cada 5 minutos el bot comprueba que lo que cree tener coincida con Binance y aplica tus controles.
+Cada minuto el bot comprueba que lo que cree tener coincida con Binance y aplica tus controles.
 
 Al cerrar cada vela de {config.strategy.timeframe} (00:00 y 12:00 UTC), revisa cada moneda: si la señal cambió,
 cierra; si sigue, sube el stop (nunca lo afloja); si no hay posición y hay señal, entra arriesgando

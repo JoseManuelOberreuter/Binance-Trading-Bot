@@ -41,6 +41,8 @@ class LiveConfig:
     use_production_filters: bool = True
     bars_lookback: int = 300                     # 12h bars fetched per cycle (Donchian 40 + ATR warmup)
     status_every_min: int = 30                   # "still running" summary in the dashboard console (user-chosen)
+    cycle_seconds: int = 60                      # poll interval (user-chosen 2026-10-11: 1 min, was 5)
+    equity_log_every_min: int = 5                # equity snapshots kept at 5 min so the log stays small
     start_paused: bool = False                   # first start with no new entries until the user activates it
     # Stop trigger price: MARK_PRICE (Binance's multi-exchange fair price) ignores momentary
     # last-price wicks like the 10-oct-2025 flash crash; CONTRACT_PRICE (last trade) matches the

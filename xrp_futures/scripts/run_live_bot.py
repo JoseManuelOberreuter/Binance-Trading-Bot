@@ -3,7 +3,7 @@ Run the live bot (Phase 4, docs/execution_plan.md).
 
   python -m xrp_futures.scripts.run_live_bot --dry-run --once   # show decisions, send nothing
   python -m xrp_futures.scripts.run_live_bot --once             # one real cycle (testnet)
-  python -m xrp_futures.scripts.run_live_bot                    # loop every 5 min (testnet)
+  python -m xrp_futures.scripts.run_live_bot                    # loop every minute (testnet)
 
 Environment comes from FUTURES_ENVIRONMENT (default testnet). Production additionally
 requires --allow-production, so real money can't be used by accident.
@@ -45,7 +45,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dry-run", action="store_true", help="decide and log, send no orders, save no state")
     parser.add_argument("--once", action="store_true", help="run a single cycle and exit")
-    parser.add_argument("--interval", type=int, default=300, help="seconds between cycles (default 300)")
+    parser.add_argument("--interval", type=int, default=None,
+                        help="seconds between cycles (default: LiveConfig.cycle_seconds, 60)")
     parser.add_argument("--allow-production", action="store_true", help="required to trade real money")
     args = parser.parse_args()
 
@@ -54,6 +55,7 @@ def main() -> None:
         raise SystemExit("FUTURES_ENVIRONMENT=production requires --allow-production (real money).")
 
     config = config_for(environment)
+    args.interval = args.interval or config.cycle_seconds
     store = StateStore(environment)
     if not args.dry_run:      # one live process per environment (dry runs send nothing)
         try:
