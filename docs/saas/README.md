@@ -24,6 +24,7 @@ riesgo controlado, en vez de operar a mano, apalancados y sin plan.
 | [04 — Legal](04_legal.md) | Ley Fintec y CMF: qué evitar, cómo diseñar el producto, pasos legales |
 | [05 — Seguridad](05_seguridad.md) | Manejo de API keys, autenticación, auditoría, incidentes |
 | [06 — Producto y front](06_producto_y_front.md) | Pantallas, onboarding, configuración, tono y textos permitidos |
+| [07 — Investigación de mercado](07_investigacion_mercado.md) | Competencia, tamaño del mercado (Chile / LatAm / mundo), lecciones de la industria, historial necesario para generar confianza, viabilidad |
 
 ## Decisiones tomadas
 
