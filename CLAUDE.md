@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two independent systems in this repo:
 
 - **`xrp_futures/`** — active development. A research/backtesting system for a Binance USDⓈ-M Futures trend-following strategy on XRPUSDT Perpetual (LONG/SHORT, low effective leverage, strict risk management). Currently backtest-only: no live order placement, no API keys required (historical data comes from Binance's public `data.binance.vision` dump) — see `xrp_futures/docs/execution_plan.md` for the (designed, not yet built) live/testnet execution + monitoring dashboard plan. Config is **frozen**: Donchian(40) signal, Chandelier(window=5, 4x ATR) trailing stop, 12h timeframe, LONG+SHORT, no filters, risk_pct=1%/trade — see `xrp_futures/docs/project_status.md` for the validated baseline and everything found since, `xrp_futures/docs/research_studies.md` for the detailed per-study methodology/results.
+- **`docs/saas/`** — planning only (nothing built yet): a subscription SaaS where each user connects their own Binance account and configures their own bot, built on `xrp_futures/execution/` (Vercel + Supabase + engine on an Oracle VM). Spanish docs: plan/phases, architecture, database, legal (Chile/CMF), security, product. Start at `docs/saas/README.md`.
 - **`legacy/spot_grid_bot/`** — legacy, frozen. The original spot grid-trading bot for ETH/USDT. Still runs, no longer developed. See `legacy/spot_grid_bot/README.md`.
 
 ## Commands
