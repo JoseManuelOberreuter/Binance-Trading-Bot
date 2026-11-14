@@ -158,6 +158,79 @@ script's own request — this did **not** test whether ETH has usable history
 further back (its Binance Futures listing predates XRP's); that's still open
 if it matters later.
 
+## 4b. Regime-scaled risk (8-asset portfolio, October 2026)
+
+`scripts/run_regime_risk.py`. Each entry's risk is scaled by the BTC regime
+(`strategies/regime.py`, causal at the decision bar): more when the trade goes
+WITH the regime, less when neutral, least when AGAINST it. The signal, stops and
+universe are unchanged.
+
+- **Engine support:** `BacktestConfig.regime_risk_multipliers` and `max_notional_pct`,
+  both off by default.
+- **Shared-capital engine:** `backtest/portfolio_engine.py` runs all symbols out of
+  ONE equity with the live exposure cap (entries over `max_total_notional_pct` x
+  equity are skipped, as in live). A one-symbol run reproduces `run_backtest`
+  exactly (tested).
+
+All figures below come from the shared-capital engine with the live 1x cap,
+mark-to-market, starting from $1,000.
+
+| Variant (with/neutral/against) | Avg risk | 2022 | 2023 | 2024 | 2025 | 2023-25 chained | 2020-26 chained | Worst DD |
+|---|---|---|---|---|---|---|---|---|
+| Fixed 0.6% (live) | 0.60% | 901 | 1,346 | 953 | 1,034 | 1,348 | 4,203 | -39% |
+| Fixed 0.75% | 0.75% | 871 | 1,321 | 923 | 945 | 1,177 | 4,210 | -47% |
+| Regime 1.0/0.5/0.25 | 0.64% | 1,059 | 1,372 | 812 | 1,073 | 1,230 | 6,862 | -48% |
+| Regime 1.2/0.6/0 | 0.85% | 1,125 | 1,683 | 699 | 1,116 | 1,311 | 10,561 | -57% |
+
+- **Over 2020-26, regime scaling beats fixed risk at the same average risk**, mostly
+  from 2020-2022. In the bear year 2022 it gains or loses little where fixed risk
+  loses about 10%.
+- **Over 2023-25 it gives no edge once the live cap applies.** 2024 is much worse
+  (BTC was bullish while alts chopped), which cancels the gains in 2023 and 2025.
+  Without the cap, regime scaling wins in every period.
+- **Walk-forward** (variant picked by Calmar on prior years only, 2022-26 chained):
+  $1,954 versus $1,407 for fixed 0.6%. Nearly all of the gap is 2022-23; the 2024
+  test year lost $699 against $953.
+- **Drawdowns are larger** (-48% to -57% versus -39%).
+- **Kill-switch finding (applies to the CURRENT live config too):** chained from 2020,
+  every variant reaches -30% from peak, which is the live kill-switch level. Fixed
+  0.6% gets there in March 2023, after the 2021 peak and the 2022 bear market. Live,
+  that would have blocked entries for good until a manual reset.
+- **The cap binds even at 0.6%:** 99 entries skipped over 2020-26, and far more at
+  higher risk.
+- **Status:** not adopted. The edge is real over the full history but absent in the
+  most recent years under the live cap, and it costs a deeper drawdown.
+
+## 4c. Keeping the worst drawdown at or under 30% (October 2026)
+
+`scripts/run_drawdown_limit.py`. Shared-capital engine with the live 1x cap and
+mark-to-market equity. A variant passes only if its worst drawdown stays at or under
+30% (the kill-switch level) from every yearly start date.
+
+The throttle is `drawdown_risk_steps` in `portfolio_engine.py`:
+- soft: half risk at -10%, a quarter at -20%;
+- hard: half at -8%, a quarter at -15%, a tenth at -22%.
+
+| Variant | 2022 | 2023 | 2024 | 2025 | 2023-25 chained | 2020-26 chained | Worst DD | Passes |
+|---|---|---|---|---|---|---|---|---|
+| Fixed 0.6% (live) | 901 | 1,346 | 953 | 1,034 | 1,348 | 4,203 | -39% | no |
+| Fixed 0.45% | 930 | 1,281 | 981 | 1,041 | 1,322 | 3,282 | -31% | no |
+| **Fixed 0.4%** | 939 | 1,254 | 988 | 1,037 | **1,296** | 2,948 | **-28%** | yes |
+| Fixed 0.3% | 956 | 1,196 | 1,000 | 1,029 | 1,237 | 2,339 | -22% | yes |
+| 0.8% + soft throttle | 884 | 1,154 | 856 | 999 | 1,091 | 2,997 | -28% | yes |
+| Regime 1.0/0.5/0.25 + soft | 1,013 | 1,218 | 921 | 1,072 | 1,143 | 3,853 | -27% | yes |
+
+- **Drawdown scales roughly linearly with risk.** 0.4% is the highest fixed risk
+  that stays under 30%.
+- **Drawdown throttles cap the drawdown but cost return,** worst in recent years
+  (2023-25 chained $1,011-1,091 versus $1,296 for fixed 0.4%). They cut risk exactly
+  when the recovery trades come.
+- **Regime + soft throttle has the best full-history result** that passes ($3,853),
+  but it is worse than fixed 0.4% over 2023-25.
+- **Recommendation:** fixed 0.4%. It is the simplest, the best of the passing
+  variants in recent years, and needs no new live code (`SET_RISK`). The margin
+  under the 30% kill-switch is thin (-28%); 0.35% would add headroom.
+
 ## 5. Open threads / not yet done
 
 - The 50% CAGR question (§2) points toward multi-asset diversification as

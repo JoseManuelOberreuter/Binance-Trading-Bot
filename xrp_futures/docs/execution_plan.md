@@ -364,6 +364,22 @@ Futures cuentan como caída para el kill-switch.
     entradas nuevas. Tope en 2% porque en el backtest de $1,000 y 8 monedas todo empeoró
     sobre ese nivel (con 3%: año típico +16% y peor caída −90%). El control muestra esa
     tabla como referencia.
+47. **Riesgo 0.4% en testnet para que la caída máxima no pase de 30%.** El simulador de
+    cartera con capital compartido y el tope de exposición real
+    (`backtest/portfolio_engine.py`, `scripts/run_drawdown_limit.py`) da estas caídas
+    máximas para 2020–2026:
+    - 0.6% fijo: **−39%**. Con el kill-switch de 30%, el bot se habría detenido en marzo
+      de 2023.
+    - 0.4% fijo: **−28%**. Es el máximo riesgo fijo bajo 30%, y el mejor de los que
+      cumplen en 2023–25.
+
+    Se descartaron el freno por pérdidas y el riesgo según la tendencia de BTC
+    (`run_regime_risk.py`): ganan más en todo el historial, pero no en los años recientes
+    con el tope real. Detalle en `project_status.md` §4b–4c.
+
+    Al aplicarlo, testnet se reinició el 2026-11-01 con $1,000 y 0.4%; los datos viejos
+    quedaron en `live_state/testnet_backup_2026-11-01/`. Producción sigue en pausa con
+    0.6%, y se cambia a 0.4% al activarla.
 
 ## Archivos
 
