@@ -10,6 +10,9 @@ Contract for `bars` (sorted by open_time, one row per bar):
   realized_vol_ann  float — annualized realized volatility as of bar i, used for
                 volatility-targeted position sizing (falls back to config.target_vol,
                 i.e. scalar 1.0, if missing/NaN so an early-warmup bar doesn't crash).
+  regime        int in {-1, 0, 1} — required only if config.regime_risk_multipliers is
+                set. CAUSAL like `signal`: the market regime known at bar i's close
+                (e.g. strategies/regime.py's BTC regime aligned onto this symbol).
 
 Funding (`funding`): calc_time, last_funding_rate — applied to whatever position is
 open at each settlement, before that bar's own entry/exit logic runs.
@@ -46,6 +49,11 @@ class BacktestConfig:
     chandelier_multiplier: float = 3.0
     trailing_enabled: bool = True
     cost_model: CostModel = field(default_factory=CostModel)
+    # Regime-scaled risk: (with, neutral, against) multipliers on risk_pct, chosen by
+    # whether the entry side agrees with bars["regime"] at the decision bar. None = off.
+    regime_risk_multipliers: tuple[float, float, float] | None = None
+    # Cap on a new position's notional as a multiple of current equity. None = no cap.
+    max_notional_pct: float | None = None
 
 
 @dataclass
@@ -123,6 +131,16 @@ def _trailing_candidate(bars: pd.DataFrame, i: int, side: int, config: BacktestC
     atr_val = bars.iloc[i]["atr"]
     close = bars.iloc[i]["close"]
     return stp.atr_stop_price(close, atr_val, config.atr_multiplier, side)
+
+
+def regime_risk_multiplier(side: int, regime: float, multipliers: tuple[float, float, float]) -> float:
+    """Risk multiplier for an entry on `side` under `regime` (1 bull, 0 neutral, -1 bear):
+    multipliers[0] if the trade goes with the regime, [1] if neutral (or unknown/NaN),
+    [2] if it goes against it."""
+    with_regime, neutral, against = multipliers
+    if not np.isfinite(regime) or regime == 0:
+        return neutral
+    return with_regime if side == int(np.sign(regime)) else against
 
 
 def run_backtest(
@@ -223,6 +241,10 @@ def run_backtest(
                     risk_pct=config.risk_pct,
                     stop_distance_pct=max(sdp, 1e-6),
                 ).notional_usdt
+            if config.regime_risk_multipliers is not None:
+                notional *= regime_risk_multiplier(side, decision_bar["regime"], config.regime_risk_multipliers)
+            if config.max_notional_pct is not None:
+                notional = min(notional, config.max_notional_pct * equity)
             if risk_engine is not None:
                 notional *= risk_engine.size_multiplier(equity)
             if notional > 0:
