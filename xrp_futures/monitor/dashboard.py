@@ -12,6 +12,8 @@ Two separate pages, never mixed: "Bot" reads only the files the bot writes under
 live_state/<env>/ (no API keys, never talks to Binance — controls go through the command
 inbox and the bot applies them at its next cycle, <= 1 min). "Cuenta Binance" shows the
 user's REAL account read-only via monitor/account.py (production key from .env).
+"Mercado" is market context only (monitor/market.py: sentiment, futures positioning,
+news, macro calendar), from public sources with no keys; it never touches the bot.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from xrp_futures.execution import commands as cmdq
 from xrp_futures.execution.state import StateStore
 from xrp_futures.monitor import account as acc
 from xrp_futures.monitor import data
+from xrp_futures.monitor import market as mk
 from xrp_futures.monitor import messages as msg
 
 st.set_page_config(page_title="Bot Futures", layout="wide", initial_sidebar_state="collapsed")
@@ -124,7 +127,8 @@ def submit(env: str, kind: str, symbol: str | None = None, value: float | None =
 # Two pages that never share a screen, picked with the selector at the top right:
 #   Testnet — the bot on testnet (test money).
 #   Binance — the bot on the REAL account (production) plus a read-only "Cuenta" tab.
-VIEWS = ("Testnet", "Binance")
+#   Mercado — market context (sentiment, news, calendar); public data, no account.
+VIEWS = ("Testnet", "Binance", "Mercado")
 
 
 def page_header(title: str, label: str, current: str) -> None:
@@ -134,7 +138,7 @@ def page_header(title: str, label: str, current: str) -> None:
     choice = select_col.selectbox("Vista", VIEWS, index=VIEWS.index(current), key=f"view_{current}",
                                   label_visibility="collapsed")
     if choice != current:
-        st.switch_page(TESTNET_PAGE if choice == "Testnet" else BINANCE_PAGE)
+        st.switch_page({"Testnet": TESTNET_PAGE, "Binance": BINANCE_PAGE, "Mercado": MARKET_PAGE}[choice])
 
 
 def testnet_page() -> None:
@@ -658,6 +662,139 @@ def account_tab(now: pd.Timestamp) -> None:
     html_block(f"<table class='kv'>{head}{''.join(rows)}</table>")
 
 
+# ----------------------------------------------------------------- Mercado ----
+FNG_COLOR = [(25, BAD), (45, WARN), (55, MUTED), (101, GOOD)]
+
+
+def fng_color(value: int) -> str:
+    return next(c for limit, c in FNG_COLOR if value < limit)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def market_fear_greed() -> pd.DataFrame | str:
+    try:
+        return mk.fetch_fear_greed(30)
+    except Exception as e:   # one source down must not blank the page
+        return f"{type(e).__name__}: {e}"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def market_futures() -> pd.DataFrame | str:
+    try:
+        return mk.fetch_futures(CONFIG.universe)
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def market_news() -> tuple[pd.DataFrame, list[str]]:
+    return mk.fetch_news(24)
+
+
+def market_page() -> None:
+    page_header("Mercado", "<span class='muted'>sentimiento, noticias y calendario · solo lectura</span>", "Mercado")
+    market_view()
+
+
+@st.fragment(run_every="5m")
+def market_view() -> None:
+    now = pd.Timestamp.now(tz="UTC")
+    fear_greed_section()
+    st.write("")
+    futures_section()
+    st.write("")
+    calendar_section(now)
+    st.write("")
+    news_section(now)
+    html_block("<p class='footer-line'>Contexto del mercado, no recomendaciones. Fuentes: alternative.me, "
+               "Binance (datos públicos), CoinDesk, Cointelegraph, The Block, Decrypt, Fed y BLS.</p>")
+
+
+def fear_greed_section() -> None:
+    fg = market_fear_greed()
+    if isinstance(fg, str) or fg.empty:
+        html_block(f"<p class='warn'>Fear &amp; Greed no disponible.</p><p class='muted'>{esc(str(fg))}</p>")
+        return
+    today = fg.iloc[-1]
+    deltas = []
+    for days, name in ((1, "ayer"), (7, "hace 7 días")):
+        if len(fg) > days:
+            d = int(today["value"] - fg.iloc[-1 - days]["value"])
+            deltas.append(f"<span class='{cls_of(d)}'>{d:+d}</span> vs {name}")
+    html_block(
+        "<div class='hero' style='margin:1.4rem 0 1rem'><div class='label'>Fear &amp; Greed · sentimiento cripto</div>"
+        f"<div class='value' style='color:{fng_color(int(today['value']))}'>{int(today['value'])}</div>"
+        f"<div class='change'>{esc(today['label'])} · {' · '.join(deltas)}</div></div>")
+    chart = alt.Chart(fg).mark_line(color=MUTED, point=alt.OverlayMarkDef(size=18)).encode(
+        x=alt.X("date:T", title=None, axis=alt.Axis(grid=False, labelColor=MUTED, domainColor=LINE,
+                                                    format="%d-%m", labelAngle=0, tickCount=8)),
+        y=alt.Y("value:Q", title=None, scale=alt.Scale(domain=[0, 100]),
+                axis=alt.Axis(gridColor=LINE, labelColor=MUTED, domain=False, values=[0, 25, 50, 75, 100])),
+        tooltip=[alt.Tooltip("date:T", title="Día", format="%d-%m-%Y"), alt.Tooltip("value:Q", title="Índice"),
+                 alt.Tooltip("label:N", title="Estado")])
+    st.altair_chart(chart.properties(height=170).configure_view(strokeWidth=0), use_container_width=True)
+    html_block("<p class='muted' style='font-size:0.85rem'>0 = miedo extremo, 100 = codicia extrema. "
+               "El miedo extremo suele aparecer cerca de pisos y la codicia extrema cerca de techos, "
+               "pero no sirve para adivinar el momento exacto.</p>")
+
+
+def futures_section() -> None:
+    st.markdown("**Traders de Futures** <span class='muted'>· Binance, tus 8 monedas</span>",
+                unsafe_allow_html=True)
+    df = market_futures()
+    if isinstance(df, str):
+        html_block(f"<p class='warn'>Datos de Futures no disponibles.</p><p class='muted'>{esc(df)}</p>")
+        return
+    html_block(f"<p>{esc(mk.futures_reading(df))}</p>")
+    head = "".join(f"<th>{h}</th>" for h in ("Moneda", "Funding (8 h)", "Interés abierto", "Cambio 24 h",
+                                              "Cuentas LONG"))
+    rows = []
+    for _, r in df.iterrows():
+        oi = f"${r['oi_usd'] / 1e6:,.0f} M" if pd.notna(r["oi_usd"]) else "—"
+        chg = (f"<span class='num {cls_of(r['oi_change'])}'>{msg.pct(r['oi_change'])}</span>"
+               if pd.notna(r["oi_change"]) else "—")
+        longs = f"{r['long_share']:.0%}" if pd.notna(r["long_share"]) else "—"
+        rows.append(f"<tr><td>{msg.coin(r['symbol'])}</td>"
+                    f"<td class='num {cls_of(r['funding'])}'>{msg.pct(r['funding'], 4)}</td>"
+                    f"<td class='num'>{oi}</td><td>{chg}</td><td class='num'>{longs}</td></tr>")
+    html_block(f"<table class='kv'><tr>{head}</tr>{''.join(rows)}</table>")
+    html_block("<p class='muted' style='font-size:0.85rem'>Funding positivo: los LONG pagan a los SHORT "
+               "(optimismo). Negativo: al revés. Interés abierto que sube = entra dinero nuevo a apostar.</p>")
+
+
+def calendar_section(now: pd.Timestamp) -> None:
+    st.markdown("**Próximos eventos** <span class='muted'>· 60 días</span>", unsafe_allow_html=True)
+    events = mk.upcoming(mk.EVENTS, now.to_pydatetime(), days=60)
+    if not events:
+        html_block("<p class='muted'>Sin eventos cargados en los próximos 60 días "
+                   "(actualizar el calendario en monitor/market.py).</p>")
+        return
+    rows = []
+    for e in events:
+        at = pd.Timestamp(e.at)
+        left = at - now
+        countdown = f"en {left.days} d" if left.days >= 1 else f"en {int(left.total_seconds() // 3600)} h"
+        rows.append(f"<tr><td class='num'>{at.tz_convert(TZ).strftime('%d-%m %H:%M')}</td>"
+                    f"<td class='num muted'>{countdown}</td><td>{esc(e.title)}"
+                    f"<div class='muted' style='font-size:0.84rem'>{esc(e.note)}</div></td></tr>")
+    html_block("<table class='kv'><tr><th>Fecha (hora local)</th><th></th><th>Evento</th></tr>"
+               f"{''.join(rows)}</table>")
+
+
+def news_section(now: pd.Timestamp) -> None:
+    st.markdown("**Noticias** <span class='muted'>· últimas 24 h</span>", unsafe_allow_html=True)
+    news, errors = market_news()
+    for err in errors:
+        html_block(f"<p class='muted' style='font-size:0.85rem'>No se pudo leer {esc(err)}</p>")
+    if news.empty:
+        html_block("<p class='muted'>Sin noticias en las últimas 24 horas.</p>")
+        return
+    items = [f"<div class='feed-item'><div class='t'>{when(r['published'], now)}</div><div>"
+             f"<a href='{html.escape(r['link'], quote=True)}' target='_blank'>{esc(r['title'])}</a>"
+             f"<div class='detail'>{esc(r['source'])}</div></div></div>" for _, r in news.head(25).iterrows()]
+    html_block("".join(items))
+
+
 # ----------------------------------------------------------- Configuración ----
 def risk_control(state, config, env: str) -> None:
     """Risk per trade (0.1%..2%). Applies to new entries; open positions keep their size."""
@@ -749,4 +886,5 @@ queda bajo el mínimo de Binance, se omite en vez de agrandar el riesgo.
 
 TESTNET_PAGE = st.Page(testnet_page, title="Testnet", url_path="testnet", default=True)
 BINANCE_PAGE = st.Page(binance_page, title="Binance", url_path="binance")
-st.navigation([TESTNET_PAGE, BINANCE_PAGE], position="hidden").run()
+MARKET_PAGE = st.Page(market_page, title="Mercado", url_path="mercado")
+st.navigation([TESTNET_PAGE, BINANCE_PAGE, MARKET_PAGE], position="hidden").run()
